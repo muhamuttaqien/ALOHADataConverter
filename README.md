@@ -12,15 +12,6 @@ The script provides customization options through command-line arguments, allowi
 - Allows customization of frame time intervals, task names, and more.
 - Outputs metadata files in JSON and JSONL formats.
 
-## Installation
-
-You can clone this repository or download the script directly. If you choose to clone the repository, use the following command:
-
-```bash
-git clone https://github.com/your-username/ALOH-Data-Converter.git
-cd ALOHA-Data-Converter
-```
-
 ## Requirements
 
 Before running the conversion script, ensure you have the following Python dependencies installed:
@@ -36,3 +27,20 @@ You can install all the required dependencies using `pip`:
 ```bash
 pip install h5py numpy pandas pyarrow natsort
 ```
+
+## Installation
+
+To set up the ALOHA-Data-Converter repository, follow these steps:
+
+### 1. Clone the repository from GitHub:
+
+```bash
+git clone https://github.com/your-username/ALOHA-Data-Converter.git
+cd ALOHA-Data-Converter
+```
+
+### 2. Install the required dependencies:
+```bash
+pip install -r requirements.txt
+```
+The repository is now ready to use!
