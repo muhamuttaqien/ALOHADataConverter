@@ -30,13 +30,13 @@ pip install h5py numpy pandas pyarrow natsort
 
 ## Installation
 
-To set up the ALOHA-Data-Converter repository, follow these steps:
+To set up the ALOHADataConverter repository, follow these steps:
 
 ### 1. Clone the repository from GitHub:
 
 ```bash
-git clone https://github.com/your-username/ALOHA-Data-Converter.git
-cd ALOHA-Data-Converter
+git clone https://github.com/your-username/ALOHADataConverter.git
+cd ALOHADataConverter
 ```
 
 ### 2. Install the required dependencies:
