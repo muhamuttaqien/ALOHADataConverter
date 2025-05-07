@@ -75,3 +75,63 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | `--chunk_prefix`       | Prefix for chunk filenames                            | `"chunk"`           |
 | `--version`            | Print the version of the script and exit              | `None` (flag only)  |
 
+## Example Commands
+
+### 1. Convert dataset to Lerobot format with default settings:
+
+```bash
+python convert_to_lerobot.py \
+  --input_dir ./my_hdf5_dataset \
+  --output_dir ./lerobot_format_dataset/data \
+  --episodes_per_file 500 \
+  --chunk_size 3
+```
+
+### 2. Convert dataset with custom frame time interval and task string:
+```bash
+python convert_to_lerobot.py \
+  --input_dir ./my_hdf5_dataset \
+  --output_dir ./lerobot_format_dataset/data \
+  --episodes_per_file 500 \
+  --chunk_size 3 \
+  --frame_time_interval 0.05 \
+  --task_string "robot_navigation"
+```
+
+### 3. Check script version:
+```bash
+python convert_to_lerobot.py --version
+```
+
+ ## Output
+
+After the script runs, the following output will be generated in the specified `--output_dir`:
+
+#### Data Files
+
+Each chunk of episodes is saved in **Parquet** format. These files are named as follows:
+- chunk-000.parquet
+- chunk-001.parquet
+- ...
+
+These files are optimized for storage and fast access, and are ready for use with Lerobot-compatible systems.
+
+#### Metadata Files
+
+In addition to the Parquet data files, the following metadata files will be created:
+
+- **`info.json`**: Contains high-level information about the dataset, including:
+  - Frames per second (FPS)
+  - Total number of episodes
+  - Total number of frames
+  - Chunking details (e.g., number of chunks, chunk size)
+  - Task names and associated video paths
+
+- **`episodes.jsonl`**: A line-delimited JSON file containing metadata for each episode. Each line includes:
+  - Episode index
+  - Frame count
+  - Associated task(s)
+
+- **`tasks.jsonl`**: A JSONL file describing each task associated with the dataset. Includes:
+  - Task index
+  - Task description
