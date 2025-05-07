@@ -156,7 +156,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert HDF5 dataset to Lerobot format")
     parser.add_argument('--input_dir', type=str, required=True, help="Path to the input HDF5 dataset directory")
     parser.add_argument('--output_dir', type=str, required=True, help="Path to the output directory for the Lerobot format")
-    parser.add_argument('--episodes_per_file', type=int, default=500, help="Number of episodes per file")
+    parser.add_argument('--episodes_per_file', type=int, default=100, help="Number of episodes per file")
     parser.add_argument('--chunk_size', type=int, default=3, help="Number of episodes per chunk")
     parser.add_argument('--frame_time_interval', type=float, default=0.1, help="Time interval between frames (seconds)")
     parser.add_argument('--task_string', type=str, default="default task", help="Task name or description")
