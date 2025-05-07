@@ -1,0 +1,5 @@
+numpy
+pandas
+h5py>=3.11.0
+pyarrow>=16.1.0
+natsort>=8.4.0
