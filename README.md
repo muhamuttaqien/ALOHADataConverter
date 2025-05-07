@@ -100,4 +100,5 @@ lerobot_dataset/task_name/
 ```
 
 ## License
-This project is licensed under the MIT License. See the LICENSE file for details.
+
+This project is not currently licensed. You are free to use the code, but please be aware that there are no official terms governing its use. If you would like to contribute or suggest a license, feel free to open an issue or pull request.
