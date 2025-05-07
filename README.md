@@ -55,7 +55,7 @@ To use the script, run the following command:
 python convert_to_lerobot.py \
   --input_dir ./path/to/hdf5_dataset \
   --output_dir ./path/to/output/lerobot_format \
-  --episodes_per_file 500 \
+  --episodes_per_file 100 \
   --chunk_size 3
 ```
 
