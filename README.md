@@ -88,7 +88,8 @@ Each chunk of episodes is saved in **Parquet** format. These files are named as 
 
 After running the script, your output directory will be organized like this:
 
-output_dir/
+```
+lerobot_dataset/task_name/
 ├── data/
 │ ├── chunk-000.parquet
 │ └── chunk-001.parquet
@@ -96,6 +97,7 @@ output_dir/
 ├── info.json
 ├── episodes.jsonl
 └── tasks.jsonl
+```
 
 ## License
 This project is licensed under the MIT License. See the LICENSE file for details.
