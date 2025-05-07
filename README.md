@@ -19,6 +19,7 @@ You can clone this repository or download the script directly. If you choose to 
 ```bash
 git clone https://github.com/your-username/ALOH-Data-Converter.git
 cd ALOHA-Data-Converter
+```
 
 ## Requirements
 
@@ -34,3 +35,4 @@ You can install all the required dependencies using `pip`:
 
 ```bash
 pip install h5py numpy pandas pyarrow natsort
+```
