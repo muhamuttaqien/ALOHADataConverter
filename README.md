@@ -19,3 +19,18 @@ You can clone this repository or download the script directly. If you choose to 
 ```bash
 git clone https://github.com/your-username/ALOH-Data-Converter.git
 cd ALOHA-Data-Converter
+
+## Requirements
+
+Before running the conversion script, ensure you have the following Python dependencies installed:
+
+- **h5py**: For reading and writing HDF5 files.
+- **numpy**: For handling numerical data and arrays.
+- **pandas**: For manipulating and analyzing data, especially for DataFrame operations.
+- **pyarrow**: For working with Apache Parquet files.
+- **natsort**: For naturally sorting filenames and data.
+
+You can install all the required dependencies using `pip`:
+
+```bash
+pip install h5py numpy pandas pyarrow natsort
