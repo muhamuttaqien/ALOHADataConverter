@@ -67,7 +67,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 |------------------------|-------------------------------------------------------|---------------------|
 | `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
 | `--output_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
-| `--episodes_per_file`  | Number of episodes per file                           | `500`               |
+| `--episodes_per_file`  | Number of episodes per file                           | `100`               |
 | `--chunk_size`         | Number of episodes per chunk                          | `3`                 |
 | `--frame_time_interval`| Time interval between frames in seconds               | `0.1`               |
 | `--task_string`        | Task name or description                              | `"default task"`    |
