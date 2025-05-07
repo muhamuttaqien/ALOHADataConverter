@@ -16,16 +16,16 @@ The script provides customization options through command-line arguments, allowi
 
 Before running the conversion script, ensure you have the following Python dependencies installed:
 
-- **h5py**: For reading and writing HDF5 files.
 - **numpy**: For handling numerical data and arrays.
 - **pandas**: For manipulating and analyzing data, especially for DataFrame operations.
+- **h5py**: For reading and writing HDF5 files.
 - **pyarrow**: For working with Apache Parquet files.
 - **natsort**: For naturally sorting filenames and data.
 
 You can install all the required dependencies using `pip`:
 
 ```bash
-pip install h5py numpy pandas pyarrow natsort
+pip install numpy pandas h5py pyarrow natsort
 ```
 
 ## Installation
