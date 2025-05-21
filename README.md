@@ -16,7 +16,7 @@ These scripts transform raw dataset files (typically containing robot data such 
 - Supports input datasets that are either compressed or uncompressed.
 - Outputs metadata files in JSON and JSONL formats.
 
-> ⚠️ **Note:** This script is designed to work with **compressed HDF5 data** (e.g., JPEG-encoded image arrays).  
+> ⚠️ **Note:** This script is designed to work with **compressed HDF5 data**.  
 > If your dataset is in **original (raw) format**, please run the provided `compress_hdf5.py` script first to convert it before using this converter.
 
 ## Requirements
