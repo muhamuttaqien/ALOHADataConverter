@@ -113,8 +113,8 @@ To use the script, run the following command:
 
 ```bash
 python convert_to_rmb.py \
-  --input ./path/to/hdf5_dataset \
-  --output ./path/to/output/rmb_dataset \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/rmb_dataset \
   --fps 30
 ```
 
@@ -128,7 +128,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | `--outout_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
 | `--fps`                | Frames per second (fps)                               | `30`                |
 
-There is no compressed argument since it will output video format.
+**Note**: There is no --compressed argument for this script because the output is saved as MP4 video files, which are already compressed.
 
  ## Output
 
