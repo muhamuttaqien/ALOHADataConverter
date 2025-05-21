@@ -83,14 +83,14 @@ def process_dataset(parent_dir, out_dir, fps=30):
 
 def main():
     parser = argparse.ArgumentParser(description="Convert HDF5 robot dataset into RGB videos.")
-    parser.add_argument('--input', type=str, required=True, help="Path to input dataset root folder.")
-    parser.add_argument('--output', type=str, required=True, help="Path to output folder.")
+    parser.add_argument('--input_dir', type=str, required=True, help="Path to input dataset root folder.")
+    parser.add_argument('--output_dir', type=str, required=True, help="Path to output folder.")
     parser.add_argument('--fps', type=int, default=30, help="Frames per second for output video.")
     
     args = parser.parse_args()
 
     if not os.path.exists(args.input_dir):
-        print(f"❌ Input directory does not exist: {args.input}")
+        print(f"❌ Input directory does not exist: {args.input_dir}")
         exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)
