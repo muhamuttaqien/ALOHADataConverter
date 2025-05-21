@@ -50,7 +50,7 @@ pip install -r requirements.txt
 ```
 The repository is now ready to use!
 
-## Usage
+## Usage (Lerobot)
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom Lerobot-compatible format.
 
