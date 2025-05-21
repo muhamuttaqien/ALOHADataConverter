@@ -1,8 +1,12 @@
 # 📦ALOHA Data Converter
 
-This repository contains a script for converting an ALOHA HDF5 dataset into the Lerobot format. The conversion process includes transforming raw dataset files (typically containing robot data such as observations and actions) into an efficient, queryable format (Parquet) compatible with [Lerobot, a robot learning dataset format](https://huggingface.co/lerobot).
+This repository contains scripts for converting an ALOHA HDF5 dataset into two widely used formats for robot learning:
 
-The script provides customization options through command-line arguments, allowing you to control various aspects of the conversion, such as frame time intervals, task names, chunk sizes, and more.
+Lerobot format: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot)
+
+RMB (RoboManipBaselines) format: used in [RoboManipBaselines](https://github.com/isri-aist/RoboManipBaselines), a benchmark suite for robotic manipulation
+
+These scripts transform raw dataset files (typically containing robot data such as observations and actions) into efficient, structured formats compatible with their respective libraries. Both formats include metadata generation and configurable chunking of episodes.
 
 ## Features
 
