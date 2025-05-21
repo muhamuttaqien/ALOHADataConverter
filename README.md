@@ -10,7 +10,7 @@ These scripts transform raw dataset files (typically containing robot data such 
 
 ## Features
 
-- Converts raw HDF5 datasets to the Lerobot format.
+- Converts raw HDF5 datasets to the Lerobot and RMB formats.
 - Supports multiple datasets within a directory.
 - Supports controlling the number of episodes per chunk and episodes per file.
 - Allows customization of frame time intervals, task names, and more.
@@ -25,11 +25,12 @@ Before running the conversion script, ensure you have the following Python depen
 - **h5py**: For reading and writing HDF5 files.
 - **pyarrow**: For working with Apache Parquet files.
 - **natsort**: For naturally sorting filenames and data.
+- **nopencv-python (cv2)**: For handling image data (e.g., visual observations in episodes).
 
 You can install all the required dependencies using `pip`:
 
 ```bash
-pip install numpy pandas h5py pyarrow natsort
+pip install numpy pandas h5py pyarrow natsort opencv-python
 ```
 
 ## Installation
