@@ -105,6 +105,48 @@ lerobot_dataset/task_name/
 └── tasks.jsonl
 ```
 
+## Usage (RMB)
+
+The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom RMB-compatible format.
+
+To use the script, run the following command:
+
+```bash
+python convert_to_rmb.py \
+  --input ./path/to/hdf5_dataset \
+  --output ./path/to/output/rmb_dataset \
+  --fps 30
+```
+
+## Command-line Arguments
+
+The following arguments can be passed to the `convert_to_lerobot.py` script:
+
+| Argument               | Description                                           | Default Value       |
+|------------------------|-------------------------------------------------------|---------------------|
+| `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
+| `--outout_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
+| `--fps`                | Frames per second (fps)                               | `30`                |
+
+There is no compressed argument since it will output video format.
+
+ ## Output
+
+After the script runs, the following output will be generated in the specified `--output_dir`:
+
+#### Data Files
+
+After running the script, your output directory will be organized like this:
+
+```
+rmb_dataset/task_name/
+└── episode_000000.rmb/
+    ├── cam_high_rgb_image.rmb.mp4
+    ├── cam_left_wrist_rgb_image.rmb.mp4
+    ├── cam_low_rgb_image.rmb.mp4
+    └── cam_right_wrist_rgb_image.rmb.mp4
+```
+
 ## License
 
 This project is not currently licensed. You are free to use the code, but please be aware that there are no official terms governing its use. If you would like to contribute or suggest a license, feel free to open an issue or pull request.
