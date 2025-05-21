@@ -128,7 +128,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | `--outout_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
 | `--fps`                | Frames per second (fps)                               | `30`                |
 
-**Note**: There is no --compressed argument for this script because the output is saved as MP4 video files, which are already compressed.
+**Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
 
  ## Output
 
