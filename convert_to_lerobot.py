@@ -91,6 +91,7 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                         obs_keys = [key for key in arrays.keys() if 'observations' in key]
                         action_keys = [key for key in arrays.keys() if 'action' in key]
 
+                        # Process observation/action one by one to avoid memory spike
                         observation = np.concatenate([arrays[key] for key in obs_keys], axis=1).astype(np.float32)
                         action = np.concatenate([arrays[key] for key in action_keys], axis=1).astype(np.float32)
 
@@ -107,6 +108,7 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                     }
 
                     for cam_name in CAMERA_NAMES:
+                        # Only keep one episode's images in memory at a time
                         flattened_images = np.stack([img.flatten() for img in image_dict[cam_name]], axis=0)
                         arrays[f'observations.images.{cam_name}'] = flattened_images
 
@@ -132,6 +134,12 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                 table = pa.Table.from_pandas(df)
                 pq.write_table(table, out_dir / f"data/chunk-000/episode_{episode_count:06d}.parquet")
 
+                # Explicitly free memory
+                del observation, action, arrays, df, table, new_data
+                if not compressed:
+                    del image_dict
+                import gc; gc.collect()
+
                 episodes_meta.append({
                     "episode_index": episode_count,
                     "length": T,
@@ -143,8 +151,8 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                 episode_count += 1
 
             # Save metadata
-            obs_dim = observation.shape[1]
-            act_dim = action.shape[1]
+            obs_dim = T and observation.shape[1] or 0
+            act_dim = T and action.shape[1] or 0
 
             features = {
                 "observation.state": {"dtype": "float32", "shape": [obs_dim]},
@@ -197,7 +205,7 @@ def main():
     args = parser.parse_args()
 
     if not os.path.exists(args.input_dir):
-        print(f"❌ Input directory does not exist: {args.input}")
+        print(f"❌ Input directory does not exist: {args.input_dir}")
         exit(1)
 
     os.makedirs(args.output_dir, exist_ok=True)
