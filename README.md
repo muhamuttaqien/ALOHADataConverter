@@ -178,6 +178,13 @@ python convert_to_gr00t.py \
 
 The following arguments can be passed to the `convert_to_gr00t.py` script:
 
+| Argument               | Description                                           | Default Value       |
+|------------------------|-------------------------------------------------------|---------------------|
+| `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
+| `--outout_dir`         | Path to the output directory for the GR00T format     | **Required**        |
+| `--fps`                | Frames per second (fps)                               | `30`                |
+| `--cameras`            | Camera names to export                                | `cam_high cam_left_wrist cam_low cam_right_wrist`                |
+
 **Note**: Each camera stream is exported as a compressed MP4 file. The vector features (`qpos`, `qvel`, `effort`, `action`) are stored in Parquet format.
 
 ## GR00T: Output
