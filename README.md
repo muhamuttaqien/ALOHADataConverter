@@ -133,7 +133,7 @@ python convert_to_rmb.py \
 
 ## RMB: Command-line Arguments
 
-The following arguments can be passed to the `convert_to_lerobot.py` script:
+The following arguments can be passed to the `convert_to_rmb.py` script:
 
 | Argument               | Description                                           | Default Value       |
 |------------------------|-------------------------------------------------------|---------------------|
