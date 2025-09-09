@@ -2,9 +2,11 @@
 
 This repository contains scripts for converting an ALOHA HDF5 dataset into two widely used formats for robot learning:
 
-Lerobot format: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot)
+**Lerobot format**: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot).
 
-RMB (RoboManipBaselines) format: used in [RoboManipBaselines](https://github.com/isri-aist/RoboManipBaselines), a benchmark suite for robotic manipulation
+**RMB (RoboManipBaselines) format**: used in [RoboManipBaselines](https://github.com/isri-aist/RoboManipBaselines), a benchmark suite for robotic manipulation.
+
+**GR00T format**: parquet + per-camera MP4 layout compatible with [NVIDIA Isaac GR00T](https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/LeRobot_compatible_data_schema.md) training pipelines.
 
 These scripts transform raw dataset files (typically containing robot data such as observations and actions) into efficient, structured formats compatible with their respective libraries. Both formats include metadata generation and configurable chunking of episodes.
 
@@ -61,7 +63,7 @@ pip install -r requirements.txt
 ```
 The repository is now ready to use!
 
-## Usage (Lerobot)
+## Lerobot: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom Lerobot-compatible format.
 
@@ -78,7 +80,7 @@ python convert_to_lerobot.py \
   --compressed
 ```
 
-## Command-line Arguments
+## Lerobot: Command-line Arguments
 
 The following arguments can be passed to the `convert_to_lerobot.py` script:
 
@@ -92,7 +94,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | `--chunk_size`         | Number of episodes per chunk                          | `3`                 |
 | `--compressed`         | Indicates if the output data is compressed            | `True` (flag only)  |
 
- ## Output
+ ## Lerobot: Output
 
 After the script runs, the following output will be generated in the specified `--output_dir`:
 
@@ -116,7 +118,7 @@ lerobot_dataset/task_name/
 └── tasks.jsonl
 ```
 
-## Usage (RMB)
+## RMB: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom RMB-compatible format.
 
@@ -129,21 +131,21 @@ python convert_to_rmb.py \
   --fps 30
 ```
 
-## Command-line Arguments
+## RMB: Command-line Arguments
 
-The following arguments can be passed to the `convert_to_lerobot.py` script:
+The following arguments can be passed to the `convert_to_rmb.py` script:
 
 | Argument               | Description                                           | Default Value       |
 |------------------------|-------------------------------------------------------|---------------------|
 | `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
-| `--outout_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
+| `--output_dir`         | Path to the output directory for the RMB format       | **Required**        |
 | `--fps`                | Frames per second (fps)                               | `30`                |
 
 **Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
 
- ## Output
+ ## RMB: Output
 
-After the script runs, the following output will be generated in the specified `--output_dir`:
+After the script runs, the following output will be generated in the specified `--output_dir`.
 
 #### Data Files
 
@@ -156,6 +158,60 @@ rmb_dataset/task_name/
     ├── cam_left_wrist_rgb_image.rmb.mp4
     ├── cam_low_rgb_image.rmb.mp4
     └── cam_right_wrist_rgb_image.rmb.mp4
+```
+
+## GR00T: Usage
+
+The script can be executed directly from the command line. It processes the dataset and outputs the results in a GR00T-compatible format (parquet + per-camera MP4s + metadata).
+
+To use the script, run the following command:
+
+```bash
+python convert_to_gr00t.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/gr00t_dataset \
+  --fps 30 \
+  --cameras cam_high cam_left_wrist cam_low cam_right_wrist
+```
+
+## GR00T: Command-line Arguments
+
+The following arguments can be passed to the `convert_to_gr00t.py` script:
+
+| Argument               | Description                                           | Default Value       |
+|------------------------|-------------------------------------------------------|---------------------|
+| `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
+| `--output_dir`         | Path to the output directory for the GR00T format     | **Required**        |
+| `--fps`                | Frames per second (fps)                               | `30`                |
+| `--cameras`            | Camera names to export                                | `cam_high cam_left_wrist cam_low cam_right_wrist`                |
+
+**Note**: Each camera stream is exported as a compressed MP4 file. The vector features (`qpos`, `qvel`, `effort`, `action`) are stored in Parquet format.
+
+## GR00T: Output
+
+After the script runs, the following output will be generated in the specified `--output_dir`.
+
+#### Data Files
+
+After running the script, your output directory will be organized like this:
+
+```
+gr00t_dataset/task_name/
+├── data/chunk-000/
+│   ├── episode_000000.parquet
+│   ├── episode_000001.parquet
+│   └── ...
+├── videos/chunk-000/
+│   ├── observation.images.cam_high/episode_000000.mp4
+│   ├── observation.images.cam_left_wrist/episode_000000.mp4
+│   ├── observation.images.cam_low/episode_000000.mp4
+│   └── observation.images.cam_right_wrist/episode_000000.mp4
+└── meta/
+    ├── episodes.jsonl
+    ├── tasks.jsonl
+    ├── modality.json
+    ├── info.json
+    └── stats.json
 ```
 
 ## License

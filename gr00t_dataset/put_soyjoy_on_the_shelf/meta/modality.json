@@ -1,0 +1,48 @@
+{
+  "state": {
+    "qpos": {
+      "start": 0,
+      "end": 14
+    },
+    "qvel": {
+      "start": 14,
+      "end": 28
+    },
+    "effort": {
+      "start": 28,
+      "end": 42
+    }
+  },
+  "action": {
+    "qpos": {
+      "start": 0,
+      "end": 14
+    }
+  },
+  "video": {
+    "cam_high": {
+      "original_key": "observation.images.cam_high"
+    },
+    "cam_left_wrist": {
+      "original_key": "observation.images.cam_left_wrist"
+    },
+    "cam_low": {
+      "original_key": "observation.images.cam_low"
+    },
+    "cam_right_wrist": {
+      "original_key": "observation.images.cam_right_wrist"
+    }
+  },
+  "annotation": {
+    "human": {
+      "action": {
+        "task_description": {
+          "type": "text"
+        },
+        "validity": {
+          "type": "text"
+        }
+      }
+    }
+  }
+}

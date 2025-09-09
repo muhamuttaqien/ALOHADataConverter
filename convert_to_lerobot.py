@@ -193,14 +193,14 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
             print(f"✅ Done: {dataset_folder.name} → {episode_count} episodes.\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert HDF5 dataset to Lerobot format")
-    parser.add_argument('--input_dir', type=str, required=True, help="Path to the input HDF5 dataset directory")
-    parser.add_argument('--output_dir', type=str, required=True, help="Path to the output directory for the Lerobot format")
-    parser.add_argument('--fps', type=int, default=30, help="Frames per second (fps)")
-    parser.add_argument('--task_string', type=str, default="default task", help="Task name or description")
-    parser.add_argument('--frame_time_interval', type=float, default=0.1, help="Time interval between frames (seconds)")
-    parser.add_argument('--chunk_size', type=int, default=1000, help="Number of frames per chunk")
-    parser.add_argument('--compressed', action='store_true', help="Indicates if the output data is compressed")
+    parser = argparse.ArgumentParser(description="Convert ALOHA HDF5 dataset to Lerobot format.")
+    parser.add_argument('--input_dir', type=str, required=True, help="Path to the input HDF5 dataset directory.")
+    parser.add_argument('--output_dir', type=str, required=True, help="Path to the output directory for the Lerobot format.")
+    parser.add_argument('--fps', type=int, default=30, help="Frames per second (fps).")
+    parser.add_argument('--task_string', type=str, default="default task", help="Task name or description.")
+    parser.add_argument('--frame_time_interval', type=float, default=0.1, help="Time interval between frames (seconds).")
+    parser.add_argument('--chunk_size', type=int, default=1000, help="Number of frames per chunk.")
+    parser.add_argument('--compressed', action='store_true', help="Indicates if the output data is compressed.")
     
     args = parser.parse_args()
 
