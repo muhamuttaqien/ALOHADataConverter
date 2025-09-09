@@ -63,7 +63,7 @@ pip install -r requirements.txt
 ```
 The repository is now ready to use!
 
-## Usage (Lerobot)
+## Lerobot: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom Lerobot-compatible format.
 
@@ -80,7 +80,7 @@ python convert_to_lerobot.py \
   --compressed
 ```
 
-## Command-line Arguments
+## Lerobot: Command-line Arguments
 
 The following arguments can be passed to the `convert_to_lerobot.py` script:
 
@@ -94,7 +94,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | `--chunk_size`         | Number of episodes per chunk                          | `3`                 |
 | `--compressed`         | Indicates if the output data is compressed            | `True` (flag only)  |
 
- ## Output
+ ## Lerobot: Output
 
 After the script runs, the following output will be generated in the specified `--output_dir`:
 
@@ -118,7 +118,7 @@ lerobot_dataset/task_name/
 └── tasks.jsonl
 ```
 
-## Usage (RMB)
+## RMB: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a custom RMB-compatible format.
 
@@ -131,7 +131,7 @@ python convert_to_rmb.py \
   --fps 30
 ```
 
-## Command-line Arguments
+## RMB: Command-line Arguments
 
 The following arguments can be passed to the `convert_to_lerobot.py` script:
 
@@ -143,7 +143,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 
 **Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
 
- ## Output
+ ## RMB: Output
 
 After the script runs, the following output will be generated in the specified `--output_dir`.
 
@@ -160,7 +160,7 @@ rmb_dataset/task_name/
     └── cam_right_wrist_rgb_image.rmb.mp4
 ```
 
-## Usage (GR00T)
+## GR00T: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a GR00T-compatible format (parquet + per-camera MP4s + metadata).
 
@@ -174,13 +174,13 @@ python convert_to_gr00t.py \
   --cameras cam_high cam_left_wrist cam_low cam_right_wrist
 ```
 
-## Command-line Arguments
+## GR00T: Command-line Arguments
 
 The following arguments can be passed to the `convert_to_gr00t.py` script:
 
 **Note**: Each camera stream is exported as a compressed MP4 file. The vector features (`qpos`, `qvel`, `effort`, `action`) are stored in Parquet format.
 
-## Output
+## GR00T: Output
 
 After the script runs, the following output will be generated in the specified `--output_dir`.
 
