@@ -138,7 +138,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 | Argument               | Description                                           | Default Value       |
 |------------------------|-------------------------------------------------------|---------------------|
 | `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
-| `--output_dir`         | Path to the output directory for the Lerobot format   | **Required**        |
+| `--output_dir`         | Path to the output directory for the RMB format       | **Required**        |
 | `--fps`                | Frames per second (fps)                               | `30`                |
 
 **Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
