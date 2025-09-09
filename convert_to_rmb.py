@@ -82,9 +82,9 @@ def process_dataset(parent_dir, out_dir, fps=30):
                 print(f"✅ Done: {episode_name}")
 
 def main():
-    parser = argparse.ArgumentParser(description="Convert HDF5 robot dataset into RGB videos.")
-    parser.add_argument('--input_dir', type=str, required=True, help="Path to input dataset root folder.")
-    parser.add_argument('--output_dir', type=str, required=True, help="Path to output folder.")
+    parser = argparse.ArgumentParser(description="Convert ALOHA HDF5 robot dataset into RMB format.")
+    parser.add_argument('--input_dir', type=str, required=True, help="Path to the input HDF5 dataset directory.")
+    parser.add_argument('--output_dir', type=str, required=True, help="Path to the output directory for the RMB format.")
     parser.add_argument('--fps', type=int, default=30, help="Frames per second for output video.")
     
     args = parser.parse_args()
