@@ -2,9 +2,11 @@
 
 This repository contains scripts for converting an ALOHA HDF5 dataset into two widely used formats for robot learning:
 
-Lerobot format: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot)
+**Lerobot format**: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot).
 
-RMB (RoboManipBaselines) format: used in [RoboManipBaselines](https://github.com/isri-aist/RoboManipBaselines), a benchmark suite for robotic manipulation
+**RMB (RoboManipBaselines) format**: used in [RoboManipBaselines](https://github.com/isri-aist/RoboManipBaselines), a benchmark suite for robotic manipulation.
+
+**GR00T format**: parquet + per-camera MP4 layout compatible with [NVIDIA Isaac GR00T](https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/LeRobot_compatible_data_schema.md) training pipelines.
 
 These scripts transform raw dataset files (typically containing robot data such as observations and actions) into efficient, structured formats compatible with their respective libraries. Both formats include metadata generation and configurable chunking of episodes.
 
