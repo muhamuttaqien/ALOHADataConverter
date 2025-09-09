@@ -145,7 +145,7 @@ The following arguments can be passed to the `convert_to_lerobot.py` script:
 
  ## Output
 
-After the script runs, the following output will be generated in the specified `--output_dir`:
+After the script runs, the following output will be generated in the specified `--output_dir`.
 
 #### Data Files
 
@@ -158,6 +158,53 @@ rmb_dataset/task_name/
     ├── cam_left_wrist_rgb_image.rmb.mp4
     ├── cam_low_rgb_image.rmb.mp4
     └── cam_right_wrist_rgb_image.rmb.mp4
+```
+
+## Usage (GR00T)
+
+The script can be executed directly from the command line. It processes the dataset and outputs the results in a GR00T-compatible format (parquet + per-camera MP4s + metadata).
+
+To use the script, run the following command:
+
+```bash
+python convert_to_gr00t.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/gr00t_dataset \
+  --fps 30 \
+  --cameras cam_high cam_left_wrist cam_low cam_right_wrist
+```
+
+## Command-line Arguments
+
+The following arguments can be passed to the `convert_to_gr00t.py` script:
+
+**Note**: Each camera stream is exported as a compressed MP4 file. The vector features (`qpos`, `qvel`, `effort`, `action`) are stored in Parquet format.
+
+## Output
+
+After the script runs, the following output will be generated in the specified `--output_dir`.
+
+#### Data Files
+
+After running the script, your output directory will be organized like this:
+
+```
+gr00t_dataset/task_name/
+├── data/chunk-000/
+│   ├── episode_000000.parquet
+│   ├── episode_000001.parquet
+│   └── ...
+├── videos/chunk-000/
+│   ├── observation.images.cam_high/episode_000000.mp4
+│   ├── observation.images.cam_left_wrist/episode_000000.mp4
+│   ├── observation.images.cam_low/episode_000000.mp4
+│   └── observation.images.cam_right_wrist/episode_000000.mp4
+└── meta/
+    ├── episodes.jsonl
+    ├── tasks.jsonl
+    ├── modality.json
+    ├── info.json
+    └── stats.json
 ```
 
 ## License
