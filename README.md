@@ -1,6 +1,6 @@
 # 📦ALOHA Data Converter
 
-This repository contains scripts for converting an ALOHA HDF5 dataset into two widely used formats for robot learning:
+This repository contains scripts for converting an ALOHA HDF5 dataset into three widely used formats for robot learning:
 
 **Lerobot format**: used in datasets hosted on Hugging Face – [Lerobot](https://huggingface.co/lerobot).
 
