@@ -19,30 +19,44 @@ DCAMERA_NAMES = ["dcam_high", "dcam_low"]
 # Function to extract task name from HDF5 file
 def extract_task_name_from_hdf5(hdf5_file):
     """
-    HDF5ファイルからタスク名を抽出
-    
+    Extract task name from HDF5 file
+
     Args:
-        hdf5_file: HDF5ファイルのパス
-        
+        hdf5_file: Path to HDF5 file
+
     Returns:
-        str: タスク名
+        str: Task name
     """
     try:
         with h5py.File(hdf5_file, 'r') as f:
-            # 1. attributesからタスク名を探す
+            # 0. Try to extract from /text/prompt
+            if '/text/prompt' in f:
+                dataset = f['/text/prompt']
+                if dataset.shape == ():  # Scalar value
+                    task_name = dataset[()]
+                    if isinstance(task_name, bytes):
+                        task_name = task_name.decode('utf-8')
+                    return task_name
+                elif len(dataset) > 0:
+                    task_name = dataset[0]
+                    if isinstance(task_name, bytes):
+                        task_name = task_name.decode('utf-8')
+                    return task_name
+
+            # 1. Search for task name in attributes
             if 'task' in f.attrs:
                 task_name = f.attrs['task']
                 if isinstance(task_name, bytes):
                     task_name = task_name.decode('utf-8')
                 return task_name
-            
+
             if 'task_name' in f.attrs:
                 task_name = f.attrs['task_name']
                 if isinstance(task_name, bytes):
                     task_name = task_name.decode('utf-8')
                 return task_name
-            
-            # 2. グループ内からタスク情報を探す
+
+            # 2. Search for task info in groups
             for group_name in ['task_info', 'metadata', 'info']:
                 if group_name in f:
                     group = f[group_name]
@@ -56,33 +70,33 @@ def extract_task_name_from_hdf5(hdf5_file):
                         if isinstance(task_name, bytes):
                             task_name = task_name.decode('utf-8')
                         return task_name
-            
-            # 3. データセット内からタスク情報を探す
+
+            # 3. Search for task info in datasets
             for dataset_path in ['/task', '/task_name', '/metadata/task']:
                 if dataset_path in f:
                     dataset = f[dataset_path]
-                    if dataset.shape == ():  # スカラー値
+                    if dataset.shape == ():  # Scalar value
                         task_name = dataset[()]
                         if isinstance(task_name, bytes):
                             task_name = task_name.decode('utf-8')
                         return task_name
-                    elif len(dataset) > 0:  # 配列の最初の要素
+                    elif len(dataset) > 0:  # First element of array
                         task_name = dataset[0]
                         if isinstance(task_name, bytes):
                             task_name = task_name.decode('utf-8')
                         return task_name
-            
-            # 4. ファイル名からタスク名を推測
+
+            # 4. Guess task name from file name
             file_name = Path(hdf5_file).parent.name
             if file_name and file_name != '.':
                 return file_name.replace('_', ' ')
-            
-            # 5. デフォルト値
+
+            # 5. Default value
             return "unknown_task"
-            
+
     except Exception as e:
         print(f"Warning: Could not extract task name from {hdf5_file}: {e}")
-        # ファイル名からタスク名を推測
+        # Guess task name from file name
         file_name = Path(hdf5_file).parent.name
         if file_name and file_name != '.':
             return file_name.replace('_', ' ')
@@ -91,29 +105,30 @@ def extract_task_name_from_hdf5(hdf5_file):
 # Function to get consistent task name for a dataset folder
 def get_dataset_task_name(dataset_folder, default_task_string=None):
     """
-    データセットフォルダ内の最初のHDF5ファイルからタスク名を取得
-    
+    Get task name from the first HDF5 file in the dataset folder
+
     Args:
-        dataset_folder: データセットフォルダのパス
-        default_task_string: デフォルトのタスク名（Noneの場合は自動抽出）
-        
+        dataset_folder: Path to dataset folder
+        default_task_string: Default task name (if None, auto extract)
+
     Returns:
-        str: タスク名
+        str: Task name
     """
     if default_task_string:
         return default_task_string
-    
-    # フォルダ内の最初のHDF5ファイルからタスク名を抽出
+
+    # Extract task name from the first HDF5 file in the folder
     hdf5_files = list(dataset_folder.glob("episode*.hdf5"))
     if hdf5_files:
         task_name = extract_task_name_from_hdf5(hdf5_files[0])
         print(f"  📝 Auto-detected task name: '{task_name}'")
         return task_name
-    
-    # HDF5ファイルが見つからない場合はフォルダ名を使用
+
+    # If no HDF5 file found, use folder name
     folder_name = dataset_folder.name.replace('_', ' ')
     print(f"  📝 Using folder name as task: '{folder_name}'")
     return folder_name
+
 def extract_data(f, arrays):
     for name, obj in f.items():  # Iterate over items in the root group
         if isinstance(obj, h5py.Dataset):  # If it's a dataset (not a group)
@@ -156,7 +171,7 @@ def decode_hdf5(dataset_path):
             # Decode images
             emc_images = root[f'/observations/images/{cam_name}'][()]
             image_dict[cam_name] = [cv2.imdecode(img, 1) for img in emc_images]
-    
+
     return is_sim, qpos, qvel, effort, action, image_dict
 
 # Function to convert data and save in Lerobot format
@@ -167,7 +182,7 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
         if dataset_folder.is_dir():
             print(f"📦 Processing: {dataset_folder.name}")
 
-            # タスク名を自動抽出（task_stringがNoneまたは空の場合）
+            # Auto extract task name if task_string is None or default
             if not task_string or task_string == "default task":
                 actual_task_string = get_dataset_task_name(dataset_folder)
             else:
@@ -237,12 +252,6 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                 table = pa.Table.from_pandas(df)
                 pq.write_table(table, out_dir / f"data/chunk-000/episode_{episode_count:06d}.parquet")
 
-                # Explicitly free memory
-                del observation, action, arrays, df, table, new_data
-                if not compressed:
-                    del image_dict
-                import gc; gc.collect()
-
                 episodes_meta.append({
                     "episode_index": episode_count,
                     "length": T,
@@ -282,6 +291,12 @@ def process_dataset(input_dir, output_dir, fps, task_string, frame_time_interval
                 "total_tasks": 1
             }
 
+            # Explicitly free memory
+            if not compressed:
+                del image_dict
+            import gc; gc.collect()
+            del observation, action, arrays, df, table, new_data
+
             # Save meta files
             with open(out_dir / "meta/info.json", "w") as f:
                 json.dump(info, f, indent=2)
@@ -304,7 +319,7 @@ def main():
     parser.add_argument('--frame_time_interval', type=float, default=0.1, help="Time interval between frames (seconds).")
     parser.add_argument('--chunk_size', type=int, default=1000, help="Number of frames per chunk.")
     parser.add_argument('--compressed', action='store_true', help="Indicates if the output data is compressed.")
-    
+
     args = parser.parse_args()
 
     if not os.path.exists(args.input_dir):
@@ -322,3 +337,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+'''
+python convert_aloha_to_lerobot.py \
+  --input_dir ../../aist_bimanip_release/data/hdf5/ \
+  --output_dir ./lerobot_dataset/sample \
+  --fps 30 \
+  --frame_time_interval 0.1 \
+  --chunk_size 1000 \
+  --compressed
+'''
