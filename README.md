@@ -10,6 +10,31 @@ This repository contains scripts for converting an ALOHA HDF5 dataset into three
 
 These scripts transform raw dataset files (typically containing robot data such as observations and actions) into efficient, structured formats compatible with their respective libraries. Both formats include metadata generation and configurable chunking of episodes.
 
+## Installation
+
+Editable install:
+
+```bash
+uv pip install -e .
+```
+
+For RLDS / TFDS building, install the optional dependencies too:
+
+```bash
+uv pip install -e ".[rlds]"
+```
+
+After installation, the main commands are available as console scripts:
+
+```bash
+aloha-convert-rmb
+aloha-convert-rlds
+aloha-convert-lerobot
+aloha-convert-aloha-lerobot
+aloha-convert-gr00t
+aloha-compress-hdf5
+```
+
 ## Features
 
 - Converts raw HDF5 datasets to the Lerobot and RMB formats.
@@ -128,7 +153,9 @@ To use the script, run the following command:
 python convert_to_rmb.py \
   --input_dir ./path/to/hdf5_dataset \
   --output_dir ./path/to/output/rmb_dataset \
-  --fps 30
+  --fps 25 \
+  --camera_workers 4 \
+  --video_preset veryfast
 ```
 
 ## RMB: Command-line Arguments
@@ -139,7 +166,10 @@ The following arguments can be passed to the `convert_to_rmb.py` script:
 |------------------------|-------------------------------------------------------|---------------------|
 | `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
 | `--output_dir`         | Path to the output directory for the RMB format       | **Required**        |
-| `--fps`                | Frames per second (fps)                               | `30`                |
+| `--fps`                | Frames per second (fps)                               | `25`                |
+| `--nproc`              | Number of parallel episode workers                    | `1`                 |
+| `--camera_workers`     | Parallel workers for camera export inside one episode | `0`                 |
+| `--video_preset`       | ffmpeg/videoio preset for MP4 encoding                | `veryfast`          |
 
 **Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
 
@@ -157,7 +187,57 @@ rmb_dataset/task_name/
     ├── cam_high_rgb_image.rmb.mp4
     ├── cam_left_wrist_rgb_image.rmb.mp4
     ├── cam_low_rgb_image.rmb.mp4
-    └── cam_right_wrist_rgb_image.rmb.mp4
+    ├── cam_right_wrist_rgb_image.rmb.mp4
+    ├── dcam_high_rgb_image.rmb.mp4
+    ├── dcam_low_rgb_image.rmb.mp4
+    ├── dcam_high_depth_image.rmb.mp4
+    ├── dcam_low_depth_image.rmb.mp4
+    └── main.rmb.hdf5
+```
+
+## RLDS: Usage
+
+The script generates a TFDS / RLDS dataset package that follows the builder layout used in `third_party/rlds_dataset_builder`.
+
+```bash
+python convert_to_rlds.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/rlds_dataset \
+  --fps 25
+```
+
+If `tensorflow_datasets` is available in your environment, you can also let the script invoke `tfds build`:
+
+```bash
+python convert_to_rlds.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/rlds_dataset \
+  --fps 25 \
+  --build_tfds \
+  --overwrite
+```
+
+## RLDS: Command-line Arguments
+
+| Argument               | Description                                           | Default Value       |
+|------------------------|-------------------------------------------------------|---------------------|
+| `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
+| `--output_dir`         | Path to the output directory for the RLDS package     | **Required**        |
+| `--fps`                | Target FPS after resampling                           | `25`                |
+| `--val_ratio`          | Fraction of episodes to reserve for validation split  | `0.0`               |
+| `--build_tfds`         | Run `tfds build` after generating the package         | `False`             |
+| `--overwrite`          | Pass `--overwrite` through to `tfds build`            | `False`             |
+
+## RLDS: Output
+
+```text
+rlds_dataset/task_name/
+├── __init__.py
+├── task_name_dataset_builder.py
+├── dataset_manifest.json
+├── README.md
+├── CITATIONS.bib
+└── setup.py
 ```
 
 ## GR00T: Usage

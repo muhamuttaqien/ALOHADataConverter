@@ -130,11 +130,15 @@ def main(args):
     pool = Pool(nproc)
     pool.map(save_hdf5, [(episode, output_dir, is_compress, image_quality) for episode in  episodes])
 
-if __name__=="__main__":
+
+def cli():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_dir', action='store', type=str, help='Dataset dir.', required=True)
     parser.add_argument('--output_dir', action='store', type=str, default="./data", help='Dataset dir.')
     parser.add_argument('--nproc', type=int, default=1, help='Dataset dir.', required=False)
     parser.add_argument('--compress', action='store_true', help='compress images', required=False)
     parser.add_argument('--quality', type=int, default=50, help='imencoding quality', required=False)
-    main(vars(parser.parse_args()))  
+    main(vars(parser.parse_args()))
+
+if __name__=="__main__":
+    cli()

@@ -11,6 +11,9 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pyarrow as pa
 import natsort
+from multiprocessing import Pool
+import multiprocessing as mp
+from functools import partial
 
 # Constants
 VALIDITY_LABEL = "valid"
@@ -31,12 +34,20 @@ def decode_hdf5(dataset_path):
         effort = root["/observations/effort"][()]
         action = root["/action"][()]
 
+        # image_dict = {}
+        # if "/observations/images" in root:
+        #     for cam_name in root["/observations/images"].keys():
+        #         emc_images = root[f"/observations/images/{cam_name}"][()]
+        #         # Keep as-is (may be JPEG bytes or raw arrays); we decode later
+        #         image_dict[cam_name] = [img for img in emc_images]
+
         image_dict = {}
-        if "/observations/images" in root:
-            for cam_name in root["/observations/images"].keys():
-                emc_images = root[f"/observations/images/{cam_name}"][()]
-                # Keep as-is (may be JPEG bytes or raw arrays); we decode later
-                image_dict[cam_name] = [img for img in emc_images]
+        for cam_name in root['/observations/images'].keys():
+            emc_images = root[f'/observations/images/{cam_name}'][()]
+            image_dict[cam_name] = []
+            for img in emc_images:
+                decompressed_image = cv2.imdecode(img, 1)
+                image_dict[cam_name].append(decompressed_image)
 
     return is_sim, qpos, qvel, effort, action, image_dict
 
@@ -92,6 +103,7 @@ def process_dataset(task_folder: Path, output_dir: Path, cameras, fps: float):
             if sample is None:
                 video_shapes[cam] = (480, 640, 3)
             else:
+                print (sample.shape)
                 H, W = sample.shape[:2]
                 video_shapes[cam] = (H, W, 3)
         else:
@@ -350,9 +362,28 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Iterate task folders
-    for dataset_folder in natsort.natsorted([p for p in input_dir.iterdir() if p.is_dir()]):
-        process_dataset(Path(dataset_folder), output_dir, args.cameras, args.fps)
+    # Iterate task folders with multiprocessing
+    
+    nproc=4 # = mp.cpu_count()  # Use all available CPUs
+    dataset_folders = natsort.natsorted([p for p in input_dir.iterdir() if p.is_dir()])
+    
+    if len(dataset_folders) == 0:
+        print("⚠️ No dataset folders found.")
+        return
+    
+    print(f"🚀 Processing {len(dataset_folders)} datasets with {nproc} processes...")
+    
+    # Create partial function with fixed arguments
+    process_func = partial(process_dataset, 
+                          output_dir=output_dir, 
+                          cameras=args.cameras, 
+                          fps=args.fps)
+    
+    # Process datasets in parallel
+    with Pool(processes=nproc) as pool:
+        pool.map(process_func, dataset_folders)
+    # for dataset_folder in natsort.natsorted([p for p in input_dir.iterdir() if p.is_dir()]):
+    #     process_dataset(Path(dataset_folder), output_dir, args.cameras, args.fps)
 
 if __name__ == "__main__":
     main()
