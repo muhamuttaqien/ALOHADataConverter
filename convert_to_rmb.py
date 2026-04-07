@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
 
@@ -144,12 +146,18 @@ def decode_depth_frames(root, cam_name, sample_indices):
     return convert_depth_frames(sampled, cam_name)
 
 
-def save_rgb_video(out_path, frames, fps):
-    videoio.videosave(out_path, frames, lossless=False, preset="slow", fps=fps)
-
-
-def save_depth_video(out_path, depth_frames, fps):
-    videoio.uint16save(out_path, depth_frames, preset="slow", fps=fps)
+def export_camera_stream(hdf5_file, sample_indices, fps, rmb_dir, cam_name, is_depth, video_preset):
+    with h5py.File(hdf5_file, "r") as root:
+        if is_depth:
+            frames = decode_depth_frames(root, cam_name, sample_indices)
+            video_path = rmb_dir / f"{cam_name}_depth_image.rmb.mp4"
+            print(f"🎞️ Saving video: {video_path.name}")
+            videoio.uint16save(video_path, frames, preset=video_preset, fps=fps)
+        else:
+            frames = decode_rgb_frames(root, cam_name, sample_indices)
+            video_path = rmb_dir / f"{cam_name}_rgb_image.rmb.mp4"
+            print(f"🎞️ Saving video: {video_path.name}")
+            videoio.videosave(video_path, frames, lossless=False, preset=video_preset, fps=fps)
 
 
 def save_episode_hdf5(out_path, task_desc, qpos, qvel, action, time_values, camera_names):
@@ -205,7 +213,7 @@ def save_episode_hdf5(out_path, task_desc, qpos, qvel, action, time_values, came
 
 
 def process_single_hdf5(args):
-    hdf5_file, dataset_name, out_dir, fps = args
+    hdf5_file, dataset_name, out_dir, fps, camera_workers, video_preset = args
 
     episode_name = episode_output_name(hdf5_file)
     rmb_dir = out_dir / dataset_name / episode_name
@@ -226,24 +234,47 @@ def process_single_hdf5(args):
         action_rs = action[sample_indices]
         time_values = sample_indices.astype(np.float64) / source_fps
 
-        exported_camera_names = []
+        rgb_camera_names = list(root["/observations/images"].keys()) if "/observations/images" in root else []
+        depth_camera_names = list(root["/observations/depth"].keys()) if "/observations/depth" in root else []
+        exported_camera_names = rgb_camera_names + [name for name in depth_camera_names if name not in rgb_camera_names]
 
-        if "/observations/images" in root:
-            for cam_name in root["/observations/images"].keys():
-                rgb_frames = decode_rgb_frames(root, cam_name, sample_indices)
-                video_path = rmb_dir / f"{cam_name}_rgb_image.rmb.mp4"
-                print(f"🎞️ Saving video: {video_path.name}")
-                save_rgb_video(video_path, rgb_frames, fps)
-                exported_camera_names.append(cam_name)
+    camera_tasks = [(cam_name, False) for cam_name in rgb_camera_names] + [
+        (cam_name, True) for cam_name in depth_camera_names
+    ]
 
-        if "/observations/depth" in root:
-            for cam_name in root["/observations/depth"].keys():
-                depth_frames = decode_depth_frames(root, cam_name, sample_indices)
-                video_path = rmb_dir / f"{cam_name}_depth_image.rmb.mp4"
-                print(f"🎞️ Saving video: {video_path.name}")
-                save_depth_video(video_path, depth_frames, fps)
-                if cam_name not in exported_camera_names:
-                    exported_camera_names.append(cam_name)
+    if camera_tasks:
+        max_workers = camera_workers
+        if max_workers <= 0:
+            max_workers = min(len(camera_tasks), os.cpu_count() or 1)
+
+        if max_workers > 1 and len(camera_tasks) > 1:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(
+                        export_camera_stream,
+                        hdf5_file,
+                        sample_indices,
+                        fps,
+                        rmb_dir,
+                        cam_name,
+                        is_depth,
+                        video_preset,
+                    )
+                    for cam_name, is_depth in camera_tasks
+                ]
+                for future in futures:
+                    future.result()
+        else:
+            for cam_name, is_depth in camera_tasks:
+                export_camera_stream(
+                    hdf5_file,
+                    sample_indices,
+                    fps,
+                    rmb_dir,
+                    cam_name,
+                    is_depth,
+                    video_preset,
+                )
 
     save_episode_hdf5(
         rmb_dir / "main.rmb.hdf5",
@@ -281,7 +312,7 @@ def iter_dataset_folders(input_path):
     return []
 
 
-def process_dataset(input_path, out_dir, fps=25, nproc=1):
+def process_dataset(input_path, out_dir, fps=25, nproc=1, camera_workers=0, video_preset="veryfast"):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -292,7 +323,10 @@ def process_dataset(input_path, out_dir, fps=25, nproc=1):
 
     for dataset_name, hdf5_files in dataset_folders:
         print(f"\n📦 Processing folder: {dataset_name}")
-        args_list = [(hdf5_file, dataset_name, out_dir, fps) for hdf5_file in hdf5_files]
+        args_list = [
+            (hdf5_file, dataset_name, out_dir, fps, camera_workers, video_preset)
+            for hdf5_file in hdf5_files
+        ]
 
         if nproc > 1:
             with Pool(nproc) as pool:
@@ -308,6 +342,18 @@ def main():
     parser.add_argument("--output_dir", type=str, required=True, help="Path to output folder.")
     parser.add_argument("--fps", type=float, default=25, help="Output video FPS.")
     parser.add_argument("--nproc", type=int, default=1, help="Number of parallel processes.")
+    parser.add_argument(
+        "--camera_workers",
+        type=int,
+        default=0,
+        help="Number of parallel workers for camera export within a single episode. 0 uses CPU-count-based auto.",
+    )
+    parser.add_argument(
+        "--video_preset",
+        type=str,
+        default="veryfast",
+        help="ffmpeg preset passed through videoio, e.g. ultrafast, veryfast, medium, slow.",
+    )
     args = parser.parse_args()
 
     process_dataset(
@@ -315,6 +361,8 @@ def main():
         out_dir=args.output_dir,
         fps=args.fps,
         nproc=args.nproc,
+        camera_workers=args.camera_workers,
+        video_preset=args.video_preset,
     )
 
 

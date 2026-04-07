@@ -128,7 +128,9 @@ To use the script, run the following command:
 python convert_to_rmb.py \
   --input_dir ./path/to/hdf5_dataset \
   --output_dir ./path/to/output/rmb_dataset \
-  --fps 25
+  --fps 25 \
+  --camera_workers 4 \
+  --video_preset veryfast
 ```
 
 ## RMB: Command-line Arguments
@@ -139,7 +141,10 @@ The following arguments can be passed to the `convert_to_rmb.py` script:
 |------------------------|-------------------------------------------------------|---------------------|
 | `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
 | `--output_dir`         | Path to the output directory for the RMB format       | **Required**        |
-| `--fps`                | Frames per second (fps)                               | `30`                |
+| `--fps`                | Frames per second (fps)                               | `25`                |
+| `--nproc`              | Number of parallel episode workers                    | `1`                 |
+| `--camera_workers`     | Parallel workers for camera export inside one episode | `0`                 |
+| `--video_preset`       | ffmpeg/videoio preset for MP4 encoding                | `veryfast`          |
 
 **Note**: There is no `--compressed` argument for this script because the output is saved as MP4 video files, which are already compressed.
 
@@ -157,7 +162,12 @@ rmb_dataset/task_name/
     ├── cam_high_rgb_image.rmb.mp4
     ├── cam_left_wrist_rgb_image.rmb.mp4
     ├── cam_low_rgb_image.rmb.mp4
-    └── cam_right_wrist_rgb_image.rmb.mp4
+    ├── cam_right_wrist_rgb_image.rmb.mp4
+    ├── dcam_high_rgb_image.rmb.mp4
+    ├── dcam_low_rgb_image.rmb.mp4
+    ├── dcam_high_depth_image.rmb.mp4
+    ├── dcam_low_depth_image.rmb.mp4
+    └── main.rmb.hdf5
 ```
 
 ## GR00T: Usage
