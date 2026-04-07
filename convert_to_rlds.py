@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import importlib.util
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -493,27 +493,59 @@ def write_dataset_package(package_dir, manifest):
 
 
 def maybe_build_tfds(package_dir, overwrite):
-    tfds_cmd = shutil.which("tfds")
-    if tfds_cmd is not None:
-        cmd = [tfds_cmd, "build"]
-    else:
-        try:
-            import tensorflow_datasets  # noqa: F401
-        except ModuleNotFoundError:
-            print(
-                "⚠️  `tensorflow_datasets` is not installed in the current environment. "
-                "Builder package was generated, but tfds build was skipped.\n"
-                "   Install RLDS build dependencies first, for example:\n"
-                "   uv pip install -e '.[rlds]'"
-            )
-            return
-        cmd = [sys.executable, "-m", "tensorflow_datasets.scripts.cli.main", "build"]
+    package_dir = Path(package_dir).resolve()
 
-    if overwrite:
-        cmd.append("--overwrite")
+    if importlib.util.find_spec("tensorflow_datasets") is None:
+        print(
+            "⚠️  `tensorflow_datasets` is not installed in the current environment. "
+            "Builder package was generated, but tfds build was skipped.\n"
+            "   Install RLDS build dependencies first, for example:\n"
+            "   uv pip install -e '.[rlds]'"
+        )
+        return
+
+    dataset_name = package_dir.name
+    builder_module_name = f"{dataset_name}.{dataset_name}_dataset_builder"
+    builder_class_name = camel_case(dataset_name)
+
+    build_script = f"""
+import importlib
+import os
+import shutil
+import sys
+from pathlib import Path
+
+package_dir = Path({str(package_dir)!r}).resolve()
+sys.path.insert(0, str(package_dir.parent))
+module = importlib.import_module({builder_module_name!r})
+builder_cls = getattr(module, {builder_class_name!r})
+builder = builder_cls()
+if {overwrite!r}:
+    data_path = Path(builder.data_path)
+    if data_path.exists():
+        shutil.rmtree(data_path)
+builder.download_and_prepare(download_config=None)
+print("built", builder.info.name, builder.info.version)
+"""
+
+    env = os.environ.copy()
+    env.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+    python_exe = sys.executable
+    virtual_env = env.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidate = Path(virtual_env) / "bin" / "python"
+        if candidate.exists():
+            python_exe = str(candidate)
 
     print(f"🏗️ Building TFDS package in {package_dir}")
-    subprocess.run(cmd, cwd=package_dir, check=True)
+    try:
+        subprocess.run([python_exe, "-c", build_script], cwd=package_dir, env=env, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "TFDS build failed. The generated builder package is present, but the local TensorFlow/TFDS/protobuf "
+            "environment is inconsistent. A common fix is reinstalling RLDS extras into a clean venv, or pinning "
+            "`protobuf` to 3.20.x for older TFDS stacks."
+        ) from exc
 
 
 def process_dataset_folder(dataset_name, hdf5_files, output_dir, fps, val_ratio, build_tfds, overwrite):
