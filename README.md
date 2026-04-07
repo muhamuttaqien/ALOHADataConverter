@@ -128,7 +128,7 @@ To use the script, run the following command:
 python convert_to_rmb.py \
   --input_dir ./path/to/hdf5_dataset \
   --output_dir ./path/to/output/rmb_dataset \
-  --fps 30
+  --fps 25
 ```
 
 ## RMB: Command-line Arguments
