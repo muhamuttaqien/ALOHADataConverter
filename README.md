@@ -10,6 +10,31 @@ This repository contains scripts for converting an ALOHA HDF5 dataset into two w
 
 These scripts transform raw dataset files (typically containing robot data such as observations and actions) into efficient, structured formats compatible with their respective libraries. Both formats include metadata generation and configurable chunking of episodes.
 
+## Installation
+
+Editable install:
+
+```bash
+uv pip install -e .
+```
+
+For RLDS / TFDS building, install the optional dependencies too:
+
+```bash
+uv pip install -e ".[rlds]"
+```
+
+After installation, the main commands are available as console scripts:
+
+```bash
+aloha-convert-rmb
+aloha-convert-rlds
+aloha-convert-lerobot
+aloha-convert-aloha-lerobot
+aloha-convert-gr00t
+aloha-compress-hdf5
+```
+
 ## Features
 
 - Converts raw HDF5 datasets to the Lerobot and RMB formats.

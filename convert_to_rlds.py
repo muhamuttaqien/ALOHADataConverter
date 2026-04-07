@@ -494,11 +494,21 @@ def write_dataset_package(package_dir, manifest):
 
 def maybe_build_tfds(package_dir, overwrite):
     tfds_cmd = shutil.which("tfds")
-    if tfds_cmd is None:
-        print("⚠️  `tfds` command is not available. Builder package was generated, but tfds build was skipped.")
-        return
+    if tfds_cmd is not None:
+        cmd = [tfds_cmd, "build"]
+    else:
+        try:
+            import tensorflow_datasets  # noqa: F401
+        except ModuleNotFoundError:
+            print(
+                "⚠️  `tensorflow_datasets` is not installed in the current environment. "
+                "Builder package was generated, but tfds build was skipped.\n"
+                "   Install RLDS build dependencies first, for example:\n"
+                "   uv pip install -e '.[rlds]'"
+            )
+            return
+        cmd = [sys.executable, "-m", "tensorflow_datasets.scripts.cli.main", "build"]
 
-    cmd = [tfds_cmd, "build"]
     if overwrite:
         cmd.append("--overwrite")
 

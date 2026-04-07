@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aloha-data-converter"
+version = "0.1.0"
+description = "Converters from ALOHA HDF5 episodes to RMB, RLDS, LeRobot, and GR00T formats."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "h5py>=3.11.0",
+  "pyarrow>=16.1.0",
+  "natsort>=8.4.0",
+  "opencv-python",
+  "videoio",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+rlds = [
+  "tensorflow",
+  "tensorflow-datasets",
+  "tensorflow-hub",
+]
+
+[project.scripts]
+aloha-convert-rmb = "convert_to_rmb:main"
+aloha-convert-rlds = "convert_to_rlds:main"
+aloha-convert-lerobot = "convert_to_lerobot:main"
+aloha-convert-aloha-lerobot = "convert_aloha_to_lerobot:main"
+aloha-convert-gr00t = "convert_to_gr00t:main"
+aloha-compress-hdf5 = "compress_hdf5:cli"
+
+[tool.setuptools]
+py-modules = [
+  "compress_hdf5",
+  "convert_aloha_to_lerobot",
+  "convert_to_gr00t",
+  "convert_to_lerobot",
+  "convert_to_rlds",
+  "convert_to_rmb",
+]
