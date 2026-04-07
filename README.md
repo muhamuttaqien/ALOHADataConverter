@@ -170,6 +170,51 @@ rmb_dataset/task_name/
     └── main.rmb.hdf5
 ```
 
+## RLDS: Usage
+
+The script generates a TFDS / RLDS dataset package that follows the builder layout used in `third_party/rlds_dataset_builder`.
+
+```bash
+python convert_to_rlds.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/rlds_dataset \
+  --fps 25
+```
+
+If `tensorflow_datasets` is available in your environment, you can also let the script invoke `tfds build`:
+
+```bash
+python convert_to_rlds.py \
+  --input_dir ./path/to/hdf5_dataset \
+  --output_dir ./path/to/output/rlds_dataset \
+  --fps 25 \
+  --build_tfds \
+  --overwrite
+```
+
+## RLDS: Command-line Arguments
+
+| Argument               | Description                                           | Default Value       |
+|------------------------|-------------------------------------------------------|---------------------|
+| `--input_dir`          | Path to the input HDF5 dataset directory              | **Required**        |
+| `--output_dir`         | Path to the output directory for the RLDS package     | **Required**        |
+| `--fps`                | Target FPS after resampling                           | `25`                |
+| `--val_ratio`          | Fraction of episodes to reserve for validation split  | `0.0`               |
+| `--build_tfds`         | Run `tfds build` after generating the package         | `False`             |
+| `--overwrite`          | Pass `--overwrite` through to `tfds build`            | `False`             |
+
+## RLDS: Output
+
+```text
+rlds_dataset/task_name/
+├── __init__.py
+├── task_name_dataset_builder.py
+├── dataset_manifest.json
+├── README.md
+├── CITATIONS.bib
+└── setup.py
+```
+
 ## GR00T: Usage
 
 The script can be executed directly from the command line. It processes the dataset and outputs the results in a GR00T-compatible format (parquet + per-camera MP4s + metadata).
