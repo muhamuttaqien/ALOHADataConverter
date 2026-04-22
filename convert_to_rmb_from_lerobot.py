@@ -113,6 +113,38 @@ class VectorLayout:
     action_slice: slice | None
 
 
+@dataclass(frozen=True)
+class DatasetBundle:
+    dataset_dir: Path
+    dataset_name: str
+    info: dict
+    episodes_meta: dict
+    tasks_by_index: dict
+    vector_layout: VectorLayout
+    robot_layout: RobotLayout
+    parquet_files: tuple[Path, ...]
+    parquet_columns: tuple[tuple[str, str], ...]
+    video_specs: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class EpisodeJob:
+    dataset_dir: Path
+    dataset_name: str
+    parquet_path: Path
+    out_dir: Path
+    info: dict
+    episodes_meta: dict
+    tasks_by_index: dict
+    vector_layout: VectorLayout
+    requested_fps: float | None
+    camera_workers: int
+    video_preset: str
+    robot_urdf: str
+    robot_layout: RobotLayout
+    video_specs: tuple[dict, ...]
+
+
 def natsorted_paths(paths):
     if natsort is not None:
         return list(natsort.natsorted(paths))
@@ -425,13 +457,6 @@ def resolve_action_dim(info, vector_layout):
     if action_dim is not None and action_dim > 0:
         return action_dim
     return get_feature_shape_dim(info, "action")
-
-
-def resolve_qpos_dim(info, vector_layout, action_dim):
-    qpos_dim = slice_length(vector_layout.qpos_slice)
-    if qpos_dim is not None and qpos_dim > 0:
-        return qpos_dim
-    return action_dim
 
 
 def collect_eef_target_candidates(robot_urdf):
@@ -799,17 +824,6 @@ def format_slice(slice_obj):
     return f"{slice_obj.start}:{slice_obj.stop}"
 
 
-def format_feature_summary(info, feature_key):
-    feature_spec = get_feature_spec(info, feature_key) or {}
-    dtype = feature_spec.get("dtype", "?")
-    shape = feature_spec.get("shape", "?")
-    return f"{feature_key} (dtype={dtype}, shape={shape})"
-
-
-def list_feature_keys(info):
-    return tuple(info_features(info).keys())
-
-
 def list_parquet_columns(parquet_path):
     schema = pq.ParquetFile(parquet_path).schema_arrow
     return tuple((field.name, str(field.type)) for field in schema)
@@ -818,7 +832,7 @@ def list_parquet_columns(parquet_path):
 def build_mapping_lines(info, vector_layout, robot_layout):
     action_dim = resolve_action_dim(info, vector_layout)
     action_names = extract_action_names(info, vector_layout, action_dim) if action_dim is not None else None
-    qpos_dim = resolve_qpos_dim(info, vector_layout, action_dim) if action_dim is not None else None
+    qpos_dim = slice_length(vector_layout.qpos_slice) or action_dim
     video_specs = list_video_specs(info)
 
     lines = []
@@ -869,7 +883,7 @@ def build_mapping_lines(info, vector_layout, robot_layout):
         + " -> measured_eef_pose / command_eef_pose"
     )
 
-    if "timestamp" in list_feature_keys(info):
+    if "timestamp" in info_features(info):
         lines.append("timestamp -> time")
     else:
         lines.append("timestamp -> time (derived from fps/sample index when absent)")
@@ -891,8 +905,10 @@ def build_mapping_lines(info, vector_layout, robot_layout):
 
 def print_dataset_mapping_summary(dataset_name, info, vector_layout, robot_layout, parquet_columns=None):
     print(f"\n🧾 LeRobot keys: {dataset_name}")
-    for feature_key in list_feature_keys(info):
-        print(f"  - {format_feature_summary(info, feature_key)}")
+    for feature_key, feature_spec in info_features(info).items():
+        dtype = feature_spec.get("dtype", "?") if isinstance(feature_spec, dict) else "?"
+        shape = feature_spec.get("shape", "?") if isinstance(feature_spec, dict) else "?"
+        print(f"  - {feature_key} (dtype={dtype}, shape={shape})")
 
     if parquet_columns is not None:
         print("🧱 Parquet schema:")
@@ -902,6 +918,104 @@ def print_dataset_mapping_summary(dataset_name, info, vector_layout, robot_layou
     print("🔁 LeRobot -> RMB mapping:")
     for line in build_mapping_lines(info, vector_layout, robot_layout):
         print(f"  - {line}")
+
+
+def load_dataset_bundle(
+    dataset_dir,
+    robot_urdf,
+    arm_joint_dims=None,
+    gripper_indices=None,
+    arm_fk_dims=None,
+    eef_target_links=None,
+    robot_name=None,
+):
+    dataset_dir = Path(dataset_dir).expanduser().resolve()
+    dataset_name = dataset_dir.name
+    info, episodes_meta, tasks_by_index, modality = load_dataset_metadata(dataset_dir)
+    vector_layout = resolve_vector_layout(info, modality)
+    robot_layout = resolve_robot_layout(
+        info=info,
+        robot_urdf=robot_urdf,
+        vector_layout=vector_layout,
+        arm_joint_dims=arm_joint_dims,
+        gripper_indices=gripper_indices,
+        arm_fk_dims=arm_fk_dims,
+        eef_target_links=eef_target_links,
+        robot_name=robot_name,
+    )
+    parquet_files = tuple(list_episode_parquet_files(dataset_dir))
+    video_specs = tuple(list_video_specs(info))
+    parquet_columns = list_parquet_columns(parquet_files[0]) if parquet_files else tuple()
+
+    return DatasetBundle(
+        dataset_dir=dataset_dir,
+        dataset_name=dataset_name,
+        info=info,
+        episodes_meta=episodes_meta,
+        tasks_by_index=tasks_by_index,
+        vector_layout=vector_layout,
+        robot_layout=robot_layout,
+        parquet_files=parquet_files,
+        parquet_columns=parquet_columns,
+        video_specs=video_specs,
+    )
+
+
+def print_dataset_overview(bundle):
+    print(f"\n📦 Processing dataset: {bundle.dataset_name}")
+    print(
+        "🤖 Robot layout: "
+        f"arms={bundle.robot_layout.arm_joint_dims}, "
+        f"grippers={bundle.robot_layout.gripper_indices}, "
+        f"fk={bundle.robot_layout.arm_fk_dims}, "
+        f"eef={bundle.robot_layout.eef_target_links}"
+    )
+    if any(
+        value is not None
+        for value in (
+            bundle.vector_layout.qpos_slice,
+            bundle.vector_layout.qvel_slice,
+            bundle.vector_layout.effort_slice,
+            bundle.vector_layout.action_slice,
+        )
+    ):
+        print(
+            "🧭 Vector layout: "
+            f"qpos={bundle.vector_layout.qpos_slice}, "
+            f"qvel={bundle.vector_layout.qvel_slice}, "
+            f"effort={bundle.vector_layout.effort_slice}, "
+            f"action={bundle.vector_layout.action_slice}"
+        )
+    print_dataset_mapping_summary(
+        bundle.dataset_name,
+        bundle.info,
+        bundle.vector_layout,
+        bundle.robot_layout,
+        parquet_columns=bundle.parquet_columns,
+    )
+
+
+def build_episode_jobs(bundle, out_dir, requested_fps, camera_workers, video_preset, robot_urdf):
+    out_dir = Path(out_dir).expanduser().resolve()
+    return [
+        EpisodeJob(
+            dataset_dir=bundle.dataset_dir,
+            dataset_name=bundle.dataset_name,
+            parquet_path=parquet_path,
+            out_dir=out_dir,
+            info=bundle.info,
+            episodes_meta=bundle.episodes_meta,
+            tasks_by_index=bundle.tasks_by_index,
+            vector_layout=bundle.vector_layout,
+            requested_fps=requested_fps,
+            camera_workers=camera_workers,
+            video_preset=video_preset,
+            robot_urdf=str(robot_urdf),
+            robot_layout=bundle.robot_layout,
+            video_specs=bundle.video_specs,
+        )
+        for parquet_path in bundle.parquet_files
+    ]
 
 
 def confirm_dataset_conversion(dataset_name, assume_yes=False):
@@ -1270,45 +1384,25 @@ def episode_output_name(episode_index):
     return f"episode_{episode_index:06d}.rmb"
 
 
-def process_single_episode(args):
-    (
-        dataset_dir_str,
-        dataset_name,
-        parquet_path_str,
-        out_dir_str,
-        info,
-        episodes_meta,
-        tasks_by_index,
-        vector_layout,
-        requested_fps,
-        camera_workers,
-        video_preset,
-        robot_urdf,
-        robot_layout,
-    ) = args
-
-    dataset_dir = Path(dataset_dir_str)
-    parquet_path = Path(parquet_path_str)
-    out_dir = Path(out_dir_str)
-
-    episode_index = infer_episode_index(parquet_path)
+def process_single_episode(job):
+    episode_index = infer_episode_index(job.parquet_path)
     episode_name = episode_output_name(episode_index)
-    rmb_dir = out_dir / dataset_name / episode_name
+    rmb_dir = job.out_dir / job.dataset_name / episode_name
     rmb_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"📄 Reading parquet: {parquet_path}")
+    print(f"📄 Reading parquet: {job.parquet_path}")
 
-    observation_state, action, timestamps, task_indices = load_episode_from_parquet(parquet_path)
-    action = apply_action_slice(action, vector_layout, parquet_path)
-    if action.shape[1] != robot_layout.total_arm_joint_dim:
+    observation_state, action, timestamps, task_indices = load_episode_from_parquet(job.parquet_path)
+    action = apply_action_slice(action, job.vector_layout, job.parquet_path)
+    if action.shape[1] != job.robot_layout.total_arm_joint_dim:
         print(
-            f"⚠️  action dim for {parquet_path.name} is {action.shape[1]}. "
-            f"This converter uses the first {robot_layout.total_arm_joint_dim} dims based on the configured robot layout."
+            f"⚠️  action dim for {job.parquet_path.name} is {action.shape[1]}. "
+            f"This converter uses the first {job.robot_layout.total_arm_joint_dim} dims based on the configured robot layout."
         )
-    qpos, qvel, effort = split_state_components(observation_state, action.shape[1], parquet_path, vector_layout)
+    qpos, qvel, effort = split_state_components(observation_state, action.shape[1], job.parquet_path, job.vector_layout)
 
-    source_fps = resolve_source_fps(info, timestamps)
-    target_fps = resolve_target_fps(source_fps, requested_fps)
+    source_fps = resolve_source_fps(job.info, timestamps)
+    target_fps = resolve_target_fps(source_fps, job.requested_fps)
     sample_indices = build_sample_indices(len(action), source_fps, target_fps)
 
     qpos_rs = qpos[sample_indices]
@@ -1322,24 +1416,24 @@ def process_single_episode(args):
         time_values = sample_indices.astype(np.float64) / source_fps
 
     task_desc = resolve_episode_task_desc(
-        dataset_name=dataset_name,
+        dataset_name=job.dataset_name,
         episode_index=episode_index,
-        episodes_meta=episodes_meta,
-        tasks_by_index=tasks_by_index,
+        episodes_meta=job.episodes_meta,
+        tasks_by_index=job.tasks_by_index,
         task_indices=task_indices,
     )
 
     camera_names = export_episode_videos(
-        dataset_dir=dataset_dir,
-        info=info,
-        parquet_path=parquet_path,
+        dataset_dir=job.dataset_dir,
+        info=job.info,
+        parquet_path=job.parquet_path,
         episode_index=episode_index,
         sample_indices=sample_indices,
         fps=target_fps,
         rmb_dir=rmb_dir,
-        video_specs=list_video_specs(info),
-        camera_workers=camera_workers,
-        video_preset=video_preset,
+        video_specs=job.video_specs,
+        camera_workers=job.camera_workers,
+        video_preset=job.video_preset,
     )
 
     save_episode_hdf5_compatible(
@@ -1353,12 +1447,12 @@ def process_single_episode(args):
         camera_names=camera_names,
         kinematics_per_arm=[
             (
-                UrdfKinematics(robot_urdf, target_link=target_link)
+                UrdfKinematics(job.robot_urdf, target_link=target_link)
                 if target_link is not None else None
             )
-            for target_link in robot_layout.eef_target_links
+            for target_link in job.robot_layout.eef_target_links
         ],
-        layout=robot_layout,
+        layout=job.robot_layout,
     )
 
     print(f"✅ Done: {episode_name}")
@@ -1389,78 +1483,32 @@ def process_dataset(
         return
 
     for dataset_dir in dataset_dirs:
-        dataset_name = dataset_dir.name
-        info, episodes_meta, tasks_by_index, modality = load_dataset_metadata(dataset_dir)
-        vector_layout = resolve_vector_layout(info, modality)
-        robot_layout = resolve_robot_layout(
-            info=info,
+        bundle = load_dataset_bundle(
+            dataset_dir=dataset_dir,
             robot_urdf=robot_urdf,
-            vector_layout=vector_layout,
             arm_joint_dims=arm_joint_dims,
             gripper_indices=gripper_indices,
             arm_fk_dims=arm_fk_dims,
             eef_target_links=eef_target_links,
             robot_name=robot_name,
         )
-        parquet_files = list_episode_parquet_files(dataset_dir)
 
-        if not parquet_files:
-            print(f"⚠️  No parquet episodes found in dataset: {dataset_dir}")
+        if not bundle.parquet_files:
+            print(f"⚠️  No parquet episodes found in dataset: {bundle.dataset_dir}")
             continue
 
-        parquet_columns = list_parquet_columns(parquet_files[0])
-
-        print(f"\n📦 Processing dataset: {dataset_name}")
-        print(
-            "🤖 Robot layout: "
-            f"arms={robot_layout.arm_joint_dims}, "
-            f"grippers={robot_layout.gripper_indices}, "
-            f"fk={robot_layout.arm_fk_dims}, "
-            f"eef={robot_layout.eef_target_links}"
-        )
-        if any(value is not None for value in (vector_layout.qpos_slice, vector_layout.qvel_slice, vector_layout.effort_slice, vector_layout.action_slice)):
-            print(
-                "🧭 Vector layout: "
-                f"qpos={vector_layout.qpos_slice}, "
-                f"qvel={vector_layout.qvel_slice}, "
-                f"effort={vector_layout.effort_slice}, "
-                f"action={vector_layout.action_slice}"
-            )
-        print_dataset_mapping_summary(
-            dataset_name,
-            info,
-            vector_layout,
-            robot_layout,
-            parquet_columns=parquet_columns,
-        )
-        if not confirm_dataset_conversion(dataset_name, assume_yes=assume_yes):
-            print(f"⏭️  Skipped dataset: {dataset_name}")
+        print_dataset_overview(bundle)
+        if not confirm_dataset_conversion(bundle.dataset_name, assume_yes=assume_yes):
+            print(f"⏭️  Skipped dataset: {bundle.dataset_name}")
             continue
-        args_list = [
-            (
-                str(dataset_dir),
-                dataset_name,
-                str(parquet_path),
-                str(out_dir),
-                info,
-                episodes_meta,
-                tasks_by_index,
-                vector_layout,
-                fps,
-                camera_workers,
-                video_preset,
-                str(robot_urdf),
-                robot_layout,
-            )
-            for parquet_path in parquet_files
-        ]
+        jobs = build_episode_jobs(bundle, out_dir, fps, camera_workers, video_preset, robot_urdf)
 
         if nproc > 1:
             with Pool(nproc) as pool:
-                pool.map(process_single_episode, args_list)
+                pool.map(process_single_episode, jobs)
         else:
-            for args in args_list:
-                process_single_episode(args)
+            for job in jobs:
+                process_single_episode(job)
 
 
 def main():
