@@ -183,20 +183,22 @@ class {class_name}(tfds.core.GeneratorBasedBuilder):
         }}
 
     def _generate_examples(self, split_name) -> Iterator[Tuple[str, Any]]:
-        episode_paths = self._manifest["splits"][split_name]
+        episode_records = self._manifest["splits"][split_name]
         target_fps = float(self._manifest["target_fps"])
         language_embedding_dim = int(self._manifest["language_embedding_dim"])
 
-        for episode_path in episode_paths:
+        for episode_record in episode_records:
+            episode_path = episode_record["path"]
+            task_name = episode_record["task_name"]
             with h5py.File(episode_path, "r") as root:
-                qpos = root["/observations/qpos"][()].astype(np.float32)
-                qvel = root["/observations/qvel"][()].astype(np.float32)
-                effort = root["/observations/effort"][()].astype(np.float32)
-                action = root["/action"][()].astype(np.float32)
-                state = np.concatenate([qpos, qvel, effort], axis=1)
-
+                source_length = int(root["/action"].shape[0])
                 source_fps = infer_source_fps(root, target_fps)
-                sample_indices = build_sample_indices(len(action), source_fps, target_fps)
+                sample_indices = build_sample_indices(source_length, source_fps, target_fps)
+                qpos = root["/observations/qpos"][sample_indices].astype(np.float32)
+                qvel = root["/observations/qvel"][sample_indices].astype(np.float32)
+                effort = root["/observations/effort"][sample_indices].astype(np.float32)
+                action = root["/action"][sample_indices].astype(np.float32)
+                state = np.concatenate([qpos, qvel, effort], axis=1)
                 task_desc = extract_task_desc(root)
 
                 if "/text/text_embedding" in root:
@@ -204,52 +206,52 @@ class {class_name}(tfds.core.GeneratorBasedBuilder):
                 else:
                     language_embedding = np.zeros((language_embedding_dim,), dtype=np.float32)
 
-                rgb_cache = {{}}
+                rgb_encoded_cache = {{}}
                 for cam_name in self._manifest["rgb_cameras"]:
                     dataset = root[f"/observations/images/{{cam_name}}"]
-                    rgb_cache[cam_name] = [decode_rgb_frame(dataset[idx]) for idx in sample_indices]
+                    rgb_encoded_cache[cam_name] = dataset[sample_indices]
 
                 depth_cache = {{}}
                 for cam_name in self._manifest["depth_cameras"]:
                     dataset = root[f"/observations/depth/{{cam_name}}"]
                     depth_cache[cam_name] = convert_depth_frames(dataset[sample_indices])[..., None]
 
-                steps = []
-                for step_idx, src_idx in enumerate(sample_indices):
-                    observation = {{
-                        "state": state[src_idx].astype(np.float32),
-                        "qpos": qpos[src_idx].astype(np.float32),
-                        "qvel": qvel[src_idx].astype(np.float32),
-                        "effort": effort[src_idx].astype(np.float32),
-                    }}
+                def step_generator():
+                    for step_idx, src_idx in enumerate(sample_indices):
+                        observation = {{
+                            "state": state[step_idx],
+                            "qpos": qpos[step_idx],
+                            "qvel": qvel[step_idx],
+                            "effort": effort[step_idx],
+                        }}
 
-                    for cam_name in self._manifest["rgb_cameras"]:
-                        observation[f"{{cam_name}}_rgb"] = rgb_cache[cam_name][step_idx]
+                        for cam_name in self._manifest["rgb_cameras"]:
+                            observation[f"{{cam_name}}_rgb"] = decode_rgb_frame(rgb_encoded_cache[cam_name][step_idx])
 
-                    for cam_name in self._manifest["depth_cameras"]:
-                        observation[f"{{cam_name}}_depth"] = depth_cache[cam_name][step_idx]
+                        for cam_name in self._manifest["depth_cameras"]:
+                            observation[f"{{cam_name}}_depth"] = depth_cache[cam_name][step_idx]
 
-                    is_last = step_idx == (len(sample_indices) - 1)
-                    steps.append({{
-                        "observation": observation,
-                        "action": action[src_idx].astype(np.float32),
-                        "discount": np.float32(1.0),
-                        "reward": np.float32(1.0 if is_last else 0.0),
-                        "is_first": step_idx == 0,
-                        "is_last": is_last,
-                        "is_terminal": is_last,
-                        "language_instruction": task_desc,
-                        "language_embedding": language_embedding,
-                        "timestamp": np.float32(src_idx / source_fps),
-                        "source_index": np.int32(src_idx),
-                    }})
+                        is_last = step_idx == (len(sample_indices) - 1)
+                        yield {{
+                            "observation": observation,
+                            "action": action[step_idx],
+                            "discount": np.float32(1.0),
+                            "reward": np.float32(1.0 if is_last else 0.0),
+                            "is_first": step_idx == 0,
+                            "is_last": is_last,
+                            "is_terminal": is_last,
+                            "language_instruction": task_desc,
+                            "language_embedding": language_embedding,
+                            "timestamp": np.float32(src_idx / source_fps),
+                            "source_index": np.int32(src_idx),
+                        }}
 
                 yield episode_path, {{
-                    "steps": steps,
+                    "steps": step_generator(),
                     "episode_metadata": {{
                         "file_path": episode_path,
-                        "task_name": self._manifest["dataset_name"],
-                        "episode_length": len(steps),
+                        "task_name": task_name,
+                        "episode_length": len(sample_indices),
                         "source_fps": np.float32(source_fps),
                     }},
                 }}
@@ -376,27 +378,39 @@ def infer_depth_camera_shape(root, cam_name):
     return [height, width, 1]
 
 
-def make_split_map(hdf5_files, val_ratio):
-    if not hdf5_files:
+def make_split_map(episode_records, val_ratio):
+    if not episode_records:
         return {"train": []}
 
     if val_ratio <= 0.0:
-        return {"train": [str(path.resolve()) for path in hdf5_files]}
+        return {"train": episode_records}
 
-    val_count = max(1, int(round(len(hdf5_files) * val_ratio)))
-    val_count = min(val_count, len(hdf5_files) - 1) if len(hdf5_files) > 1 else 0
+    val_count = max(1, int(round(len(episode_records) * val_ratio)))
+    val_count = min(val_count, len(episode_records) - 1) if len(episode_records) > 1 else 0
 
-    train_files = hdf5_files[:-val_count] if val_count > 0 else hdf5_files
-    val_files = hdf5_files[-val_count:] if val_count > 0 else []
+    train_records = episode_records[:-val_count] if val_count > 0 else episode_records
+    val_records = episode_records[-val_count:] if val_count > 0 else []
 
-    split_map = {"train": [str(path.resolve()) for path in train_files]}
-    if val_files:
-        split_map["val"] = [str(path.resolve()) for path in val_files]
+    split_map = {"train": train_records}
+    if val_records:
+        split_map["val"] = val_records
     return split_map
 
 
-def infer_dataset_manifest(dataset_name, hdf5_files, target_fps, val_ratio):
-    first_file = hdf5_files[0]
+def make_episode_records(dataset_name, hdf5_files):
+    return [{"path": str(path.resolve()), "task_name": dataset_name} for path in hdf5_files]
+
+
+def merge_split_maps(split_maps):
+    merged = {}
+    for split_map in split_maps:
+        for split_name, records in split_map.items():
+            merged.setdefault(split_name, []).extend(records)
+    return merged
+
+
+def infer_dataset_manifest(dataset_name, episode_records, target_fps, val_ratio, merged_task_names=None, split_map=None):
+    first_file = Path(episode_records[0]["path"])
     with h5py.File(first_file, "r") as root:
         qpos_dim = int(root["/observations/qpos"].shape[1])
         qvel_dim = int(root["/observations/qvel"].shape[1])
@@ -430,7 +444,8 @@ def infer_dataset_manifest(dataset_name, hdf5_files, target_fps, val_ratio):
         "rgb_shapes": rgb_shapes,
         "depth_shapes": depth_shapes,
         "num_steps_example": int(len(sample_indices)),
-        "splits": make_split_map(hdf5_files, val_ratio),
+        "splits": split_map if split_map is not None else make_split_map(episode_records, val_ratio),
+        "task_names": sorted(set(merged_task_names or [record["task_name"] for record in episode_records])),
     }
 
 
@@ -445,7 +460,7 @@ def build_observation_feature_lines(manifest):
     for cam_name in manifest["rgb_cameras"]:
         h, w, c = manifest["rgb_shapes"][cam_name]
         lines.append(
-            f'            "{cam_name}_rgb": tfds.features.Image(shape=({h}, {w}, {c}), dtype=np.uint8, encoding_format="png", doc="RGB observation from {cam_name}."),'
+            f'            "{cam_name}_rgb": tfds.features.Image(shape=({h}, {w}, {c}), dtype=np.uint8, encoding_format="jpeg", doc="RGB observation from {cam_name}."),'
         )
 
     for cam_name in manifest["depth_cameras"]:
@@ -548,12 +563,29 @@ print("built", builder.info.name, builder.info.version)
         ) from exc
 
 
-def process_dataset_folder(dataset_name, hdf5_files, output_dir, fps, val_ratio, build_tfds, overwrite):
+def process_dataset_folder(
+    dataset_name,
+    episode_records,
+    output_dir,
+    fps,
+    val_ratio,
+    build_tfds,
+    overwrite,
+    merged_task_names=None,
+    split_map=None,
+):
     safe_name = safe_dataset_name(dataset_name)
     package_dir = Path(output_dir) / safe_name
     print(f"\n📦 Processing folder: {dataset_name} -> {safe_name}")
 
-    manifest = infer_dataset_manifest(safe_name, hdf5_files, fps, val_ratio)
+    manifest = infer_dataset_manifest(
+        safe_name,
+        episode_records,
+        fps,
+        val_ratio,
+        merged_task_names=merged_task_names,
+        split_map=split_map,
+    )
     builder_path = write_dataset_package(package_dir, manifest)
     print(f"📝 Generated builder: {builder_path}")
 
@@ -569,6 +601,17 @@ def main():
     parser.add_argument("--val_ratio", type=float, default=0.0, help="Fraction of episodes reserved for val split.")
     parser.add_argument("--build_tfds", action="store_true", help="Run `tfds build` after generating each dataset package.")
     parser.add_argument("--overwrite", action="store_true", help="Pass --overwrite to tfds build.")
+    parser.add_argument(
+        "--merge_tasks",
+        action="store_true",
+        help="Merge multiple task folders under input_dir into a single RLDS dataset package.",
+    )
+    parser.add_argument(
+        "--merged_dataset_name",
+        type=str,
+        default=None,
+        help="Dataset package name to use with --merge_tasks. Defaults to the input directory name.",
+    )
     args = parser.parse_args()
 
     dataset_folders = iter_dataset_folders(args.input_dir)
@@ -579,16 +622,42 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for dataset_name, hdf5_files in dataset_folders:
+    if args.merge_tasks:
+        merged_name = args.merged_dataset_name or Path(args.input_dir).resolve().name or "aloha_rlds_dataset"
+        split_maps = []
+        merged_task_names = []
+        for dataset_name, hdf5_files in dataset_folders:
+            episode_records = make_episode_records(dataset_name, hdf5_files)
+            split_maps.append(make_split_map(episode_records, args.val_ratio))
+            merged_task_names.append(dataset_name)
+
+        merged_split_map = merge_split_maps(split_maps)
+        merged_records = []
+        for split_name in sorted(merged_split_map.keys()):
+            merged_records.extend(merged_split_map[split_name])
+
         process_dataset_folder(
-            dataset_name=dataset_name,
-            hdf5_files=hdf5_files,
+            dataset_name=merged_name,
+            episode_records=merged_records,
             output_dir=output_dir,
             fps=args.fps,
-            val_ratio=args.val_ratio,
+            val_ratio=0.0,
             build_tfds=args.build_tfds,
             overwrite=args.overwrite,
+            merged_task_names=merged_task_names,
+            split_map=merged_split_map,
         )
+    else:
+        for dataset_name, hdf5_files in dataset_folders:
+            process_dataset_folder(
+                dataset_name=dataset_name,
+                episode_records=make_episode_records(dataset_name, hdf5_files),
+                output_dir=output_dir,
+                fps=args.fps,
+                val_ratio=args.val_ratio,
+                build_tfds=args.build_tfds,
+                overwrite=args.overwrite,
+            )
 
 
 if __name__ == "__main__":

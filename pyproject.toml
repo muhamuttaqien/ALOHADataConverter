@@ -28,6 +28,7 @@ rlds = [
 
 [project.scripts]
 aloha-convert-rmb = "convert_to_rmb:main"
+aloha-convert-rmb-from-lerobot = "convert_to_rmb_from_lerobot:main"
 aloha-convert-rlds = "convert_to_rlds:main"
 aloha-convert-lerobot = "convert_to_lerobot:main"
 aloha-convert-aloha-lerobot = "convert_aloha_to_lerobot:main"
@@ -42,4 +43,5 @@ py-modules = [
   "convert_to_lerobot",
   "convert_to_rlds",
   "convert_to_rmb",
+  "convert_to_rmb_from_lerobot",
 ]
