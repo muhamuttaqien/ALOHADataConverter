@@ -1,0 +1,80 @@
+{
+  "default_targets": {
+    "measured_joint_pos": "empty",
+    "command_joint_pos": "empty"
+  },
+  "rmb_mappings": {
+    "measured_gripper_joint_pos": {
+      "source": "observation.state",
+      "fields": [
+        "left_right_finger_joint",
+        "right_right_finger_joint"
+      ]
+    },
+    "command_gripper_joint_pos": {
+      "source": "action",
+      "fields": [
+        "left_right_finger_joint",
+        "right_right_finger_joint"
+      ]
+    },
+    "measured_eef_pose": {
+      "source": "observation.state",
+      "groups": [
+        {
+          "name": "left_hand_root",
+          "fields": [
+            "left_hand_root/x",
+            "left_hand_root/y",
+            "left_hand_root/z",
+            "left_hand_root/qx",
+            "left_hand_root/qy",
+            "left_hand_root/qz",
+            "left_hand_root/qw"
+          ]
+        },
+        {
+          "name": "right_hand_root",
+          "fields": [
+            "right_hand_root/x",
+            "right_hand_root/y",
+            "right_hand_root/z",
+            "right_hand_root/qx",
+            "right_hand_root/qy",
+            "right_hand_root/qz",
+            "right_hand_root/qw"
+          ]
+        }
+      ]
+    },
+    "command_eef_pose": {
+      "source": "action",
+      "groups": [
+        {
+          "name": "left_hand_root",
+          "fields": [
+            "left_hand_root/x",
+            "left_hand_root/y",
+            "left_hand_root/z",
+            "left_hand_root/qx",
+            "left_hand_root/qy",
+            "left_hand_root/qz",
+            "left_hand_root/qw"
+          ]
+        },
+        {
+          "name": "right_hand_root",
+          "fields": [
+            "right_hand_root/x",
+            "right_hand_root/y",
+            "right_hand_root/z",
+            "right_hand_root/qx",
+            "right_hand_root/qy",
+            "right_hand_root/qz",
+            "right_hand_root/qw"
+          ]
+        }
+      ]
+    }
+  }
+}

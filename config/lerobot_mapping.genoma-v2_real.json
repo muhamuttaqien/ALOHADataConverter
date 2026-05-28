@@ -1,0 +1,90 @@
+{
+  "vector_layout": {
+    "qpos": [0, 0],
+    "qvel": [0, 0],
+    "effort": null,
+    "action": [0, 0]
+  },
+  "robot_layout": {
+    "arm_joint_dims": [0, 0],
+    "gripper_indices": "none",
+    "arm_fk_dims": [0, 0],
+    "robot_name": "genoma"
+  },
+  "default_targets": {
+    "measured_joint_pos": "empty",
+    "command_joint_pos": "empty"
+  },
+  "rmb_mappings": {
+    "measured_eef_pose": {
+      "groups": [
+        {
+          "name": "left_hand_root",
+          "source": "observation.pose.left_hand_root.absolute",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        },
+        {
+          "name": "right_hand_root",
+          "source": "observation.pose.right_hand_root.absolute",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        }
+      ]
+    },
+    "command_eef_pose_rel": {
+      "groups": [
+        {
+          "name": "left_controller_relative",
+          "source": "action.left_controller.relative",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        },
+        {
+          "name": "right_controller_relative",
+          "source": "action.right_controller.relative",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        }
+      ]
+    },
+    "measured_gripper_joint_pos": {
+      "groups": [
+        {
+          "name": "left_gripper",
+          "source": "observation.state.left_gripper",
+          "fields": ["left_gripper"]
+        },
+        {
+          "name": "right_gripper",
+          "source": "observation.state.right_gripper",
+          "fields": ["right_gripper"]
+        }
+      ]
+    },
+    "command_gripper_joint_pos": {
+      "groups": [
+        {
+          "name": "left_gripper_absolute",
+          "source": "action.left_gripper.absolute",
+          "fields": ["left_gripper"]
+        },
+        {
+          "name": "right_gripper_absolute",
+          "source": "action.right_gripper.absolute",
+          "fields": ["right_gripper"]
+        }
+      ]
+    },
+    "command_gripper_joint_pos_rel": {
+      "groups": [
+        {
+          "name": "left_gripper_relative",
+          "source": "action.left_gripper.relative",
+          "fields": ["left_gripper"]
+        },
+        {
+          "name": "right_gripper_relative",
+          "source": "action.right_gripper.relative",
+          "fields": ["right_gripper"]
+        }
+      ]
+    }
+  }
+}

@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
@@ -58,8 +59,10 @@ from convert_to_rmb import (
     compute_eef_pose_rel,
     convert_depth_frames,
     previous_step_delta,
+    quaternion_to_rotation_matrix,
     quaternion_xyzw_from_rotation,
     resolve_robot_urdf,
+    rotation_vector_from_matrix,
 )
 
 
@@ -89,6 +92,13 @@ KNOWN_ROBOT_LAYOUTS = {
         "arm_fk_dims": (6,),
     },
 }
+EEF_TARGETS = {
+    "measured_eef_pose",
+    "command_eef_pose",
+    "measured_eef_pose_rel",
+    "command_eef_pose_rel",
+}
+AXIS_NAME_TO_INDEX = {"x": 0, "y": 1, "z": 2}
 
 
 @dataclass(frozen=True)
@@ -114,6 +124,50 @@ class VectorLayout:
 
 
 @dataclass(frozen=True)
+class AxisTransform:
+    perm: tuple[int, int, int]
+    signs: tuple[float, float, float]
+    text: str
+
+
+@dataclass(frozen=True)
+class SourceSelection:
+    source: str
+    indices: tuple[int, ...]
+    field_names: tuple[str, ...] | None
+    selector_text: str
+    label: str | None = None
+    transform: AxisTransform | None = None
+
+    @property
+    def dim(self):
+        return len(self.indices)
+
+
+@dataclass(frozen=True)
+class TargetMapping:
+    target: str
+    groups: tuple[SourceSelection, ...]
+    operation: str = "concat"
+
+    @property
+    def dim(self):
+        if self.operation == "xyz_pair_distance":
+            return len(self.groups) // 2
+        return sum(group.dim for group in self.groups)
+
+
+@dataclass(frozen=True)
+class MappingConfig:
+    path: str | None
+    vector_layout_overrides: dict
+    robot_layout_overrides: dict
+    default_target_policies: dict[str, str]
+    target_mappings: dict[str, TargetMapping]
+    eef_transform: AxisTransform | None = None
+
+
+@dataclass(frozen=True)
 class DatasetBundle:
     dataset_dir: Path
     dataset_name: str
@@ -122,8 +176,10 @@ class DatasetBundle:
     tasks_by_index: dict
     vector_layout: VectorLayout
     robot_layout: RobotLayout
+    mapping_config: MappingConfig
     parquet_files: tuple[Path, ...]
     parquet_columns: tuple[tuple[str, str], ...]
+    parquet_vector_dims: tuple[tuple[str, int], ...]
     video_specs: tuple[dict, ...]
 
 
@@ -142,7 +198,9 @@ class EpisodeJob:
     video_preset: str
     robot_urdf: str
     robot_layout: RobotLayout
+    mapping_config: MappingConfig
     video_specs: tuple[dict, ...]
+    skip_static_eef: bool = False
 
 
 def natsorted_paths(paths):
@@ -169,6 +227,54 @@ def discover_lerobot_datasets(input_path):
 def read_json(path):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def read_optional_json(path):
+    if path is None:
+        return {}
+    resolved = Path(path).expanduser().resolve()
+    return read_json(resolved)
+
+
+def parse_eef_transform_axes_arg(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() in {"none", "identity"}:
+        return None
+    axes = [axis.strip() for axis in value.split(",")]
+    if len(axes) != 3:
+        raise ValueError("--eef_transform_axes must contain three comma-separated axes, e.g. x,-z,y")
+    return {"axes": axes}
+
+
+def looks_like_eef_transform_axes_token(value):
+    parts = [part.strip().lower() for part in str(value).split(",")]
+    if len(parts) != 3:
+        return False
+    for part in parts:
+        if not part:
+            return False
+        axis_name = part[1:] if part[:1] in ("-", "+") else part
+        if axis_name not in AXIS_NAME_TO_INDEX:
+            return False
+    return True
+
+
+def normalize_cli_args(argv):
+    normalized = []
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--eef_transform_axes" and index + 1 < len(argv):
+            next_token = argv[index + 1]
+            if next_token.startswith("-") and looks_like_eef_transform_axes_token(next_token):
+                normalized.append(f"--eef_transform_axes={next_token}")
+                index += 2
+                continue
+        normalized.append(token)
+        index += 1
+    return normalized
 
 
 def read_jsonl(path):
@@ -215,6 +321,31 @@ def list_episode_parquet_files(dataset_dir):
     return natsorted_paths((dataset_dir / "data").rglob("*.parquet"))
 
 
+def parse_slice_spec(spec, context):
+    if spec is None:
+        return None
+
+    if isinstance(spec, dict):
+        if "start" not in spec or "end" not in spec:
+            raise ValueError(f"{context} must contain both 'start' and 'end'.")
+        start = spec["start"]
+        end = spec["end"]
+    elif isinstance(spec, (list, tuple)) and len(spec) == 2:
+        start, end = spec
+    else:
+        raise ValueError(f"{context} must be a {{start, end}} object or a [start, end] pair.")
+
+    try:
+        start = int(start)
+        end = int(end)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must use integer bounds.") from exc
+
+    if start < 0 or end < start:
+        raise ValueError(f"{context} must satisfy 0 <= start <= end.")
+    return slice(start, end)
+
+
 def infer_episode_index(parquet_path):
     match = re.search(r"episode_(\d+)", parquet_path.stem)
     if match:
@@ -259,6 +390,14 @@ def resolve_target_fps(source_fps, requested_fps):
     return float(requested_fps)
 
 
+def parse_bool_metadata(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def list_video_specs(info):
     specs = []
     features = info.get("features", {})
@@ -277,7 +416,7 @@ def list_video_specs(info):
             {
                 "feature_key": feature_key,
                 "camera_name": camera_name,
-                "is_depth": bool(video_info.get("video.is_depth_map", False)),
+                "is_depth": parse_bool_metadata(video_info.get("video.is_depth_map", False)),
             }
         )
 
@@ -332,6 +471,24 @@ def resolve_column_name(schema_names, exact, prefix):
     raise KeyError(
         f"Ambiguous columns for '{exact}'. Candidates: {', '.join(candidates)}"
     )
+
+
+def resolve_optional_column_name(schema_names, exact, prefix):
+    try:
+        return resolve_column_name(schema_names, exact=exact, prefix=prefix)
+    except KeyError:
+        return None
+
+
+def mapped_source_names(mapping_config):
+    if mapping_config is None:
+        return set()
+
+    sources = set()
+    for mapping in mapping_config.target_mappings.values():
+        for group in mapping.groups:
+            sources.add(group.source)
+    return sources
 
 
 def string_array(values):
@@ -411,19 +568,258 @@ def get_feature_names(info, feature_key):
     return None
 
 
-def parse_range_slice(spec):
-    if not isinstance(spec, dict):
+def source_feature_names(info, source):
+    if get_feature_spec(info, source) is None:
+        raise ValueError(f"Unsupported mapping source: {source!r}")
+    return get_feature_names(info, source)
+
+
+def parse_vector_layout_overrides(config):
+    if not isinstance(config, dict):
+        return {}
+
+    overrides = {}
+    for key in ("qpos", "qvel", "effort", "action"):
+        if key not in config:
+            continue
+        value = config[key]
+        if value is None:
+            overrides[key] = None
+        else:
+            overrides[key] = parse_slice_spec(value, f"vector_layout.{key}")
+    return overrides
+
+
+def parse_axis_transform(config, context):
+    if config is None:
         return None
-    if "start" not in spec or "end" not in spec:
+    if isinstance(config, AxisTransform):
+        return config
+    if not isinstance(config, dict):
+        raise ValueError(f"{context}.transform must be an object.")
+
+    axes = config.get("axes")
+    if axes is None:
+        perm_raw = config.get("perm")
+        signs_raw = config.get("signs", [1, 1, 1])
+        if perm_raw is None:
+            return None
+        if not isinstance(perm_raw, list) or len(perm_raw) != 3:
+            raise ValueError(f"{context}.transform.perm must be a 3-element list.")
+        if not isinstance(signs_raw, list) or len(signs_raw) != 3:
+            raise ValueError(f"{context}.transform.signs must be a 3-element list.")
+
+        perm = []
+        for axis in perm_raw:
+            axis_name = str(axis).strip().lower()
+            if axis_name not in AXIS_NAME_TO_INDEX:
+                raise ValueError(f"{context}.transform.perm contains unsupported axis {axis!r}.")
+            perm.append(AXIS_NAME_TO_INDEX[axis_name])
+        signs = [float(sign) for sign in signs_raw]
+        text = " ".join(f"{sign:+g}{'xyz'[index]}" for index, sign in zip(perm, signs))
+    else:
+        if not isinstance(axes, list) or len(axes) != 3:
+            raise ValueError(f"{context}.transform.axes must be a 3-element list, e.g. ['x', '-z', 'y'].")
+        perm = []
+        signs = []
+        tokens = []
+        for raw_axis in axes:
+            token = str(raw_axis).strip().lower()
+            sign = -1.0 if token.startswith("-") else 1.0
+            axis_name = token[1:] if token[:1] in ("-", "+") else token
+            if axis_name not in AXIS_NAME_TO_INDEX:
+                raise ValueError(f"{context}.transform.axes contains unsupported axis {raw_axis!r}.")
+            perm.append(AXIS_NAME_TO_INDEX[axis_name])
+            signs.append(sign)
+            tokens.append(("-" if sign < 0 else "") + axis_name)
+        text = "[" + ", ".join(tokens) + "]"
+
+    if sorted(perm) != [0, 1, 2]:
+        raise ValueError(f"{context}.transform must reference x, y, z exactly once.")
+    if any(not np.isclose(abs(sign), 1.0) for sign in signs):
+        raise ValueError(f"{context}.transform signs must be +1 or -1.")
+
+    return AxisTransform(perm=tuple(perm), signs=tuple(signs), text=text)
+
+
+def resolve_selection_spec(spec, info, context, inherited_source=None, inherited_transform=None):
+    if not isinstance(spec, dict):
+        raise ValueError(f"{context} must be an object.")
+
+    source = spec.get("source", inherited_source)
+    if source is None:
+        raise ValueError(f"{context} must define 'source'.")
+    source = str(source)
+
+    present_keys = [key for key in ("fields", "indices", "slice") if key in spec]
+    if len(present_keys) != 1:
+        raise ValueError(f"{context} must define exactly one of: fields, indices, slice.")
+
+    selector_key = present_keys[0]
+    field_names = None
+
+    if selector_key == "fields":
+        fields = spec["fields"]
+        if not isinstance(fields, list) or not fields:
+            raise ValueError(f"{context}.fields must be a non-empty list.")
+
+        source_spec = get_feature_spec(info, source)
+        if source_spec is None:
+            indices = list(range(len(fields)))
+            normalized_fields = [str(field) for field in fields]
+            field_names = tuple(normalized_fields)
+            selector_text = summarize_names(field_names) or ", ".join(field_names)
+        else:
+            source_names = get_feature_names(info, source)
+            if source_names is None:
+                raise ValueError(
+                    f"{context} uses named fields, but {source!r} does not expose per-dimension names in meta/info.json."
+                )
+
+            name_to_indices = {}
+            for index, name in enumerate(source_names):
+                name_to_indices.setdefault(str(name), []).append(index)
+
+            indices = []
+            normalized_fields = []
+            for field in fields:
+                field_name = str(field)
+                matches = name_to_indices.get(field_name)
+                if not matches:
+                    raise ValueError(f"{context} refers to unknown field {field_name!r} in {source!r}.")
+                if len(matches) > 1:
+                    raise ValueError(f"{context} refers to ambiguous field {field_name!r} in {source!r}.")
+                indices.append(matches[0])
+                normalized_fields.append(field_name)
+
+            field_names = tuple(normalized_fields)
+            selector_text = summarize_names(field_names) or ", ".join(field_names)
+    elif selector_key == "indices":
+        raw_indices = spec["indices"]
+        if not isinstance(raw_indices, list) or not raw_indices:
+            raise ValueError(f"{context}.indices must be a non-empty list.")
+        indices = tuple(parse_int_list(raw_indices, f"{context}.indices"))
+        selector_text = "[" + ", ".join(str(index) for index in indices) + "]"
+    else:
+        selector_slice = parse_slice_spec(spec["slice"], f"{context}.slice")
+        indices = tuple(range(selector_slice.start, selector_slice.stop))
+        selector_text = f"{selector_slice.start}:{selector_slice.stop}"
+
+    return SourceSelection(
+        source=source,
+        indices=tuple(indices),
+        field_names=field_names,
+        selector_text=selector_text,
+        label=str(spec.get("name")) if spec.get("name") else None,
+        transform=parse_axis_transform(spec.get("transform", inherited_transform), context),
+    )
+
+
+def resolve_target_mapping(target, spec, info, global_transform=None):
+    if not isinstance(spec, dict):
+        raise ValueError(f"rmb_mappings.{target} must be an object.")
+
+    inherited_source = spec.get("source")
+    inherited_transform = spec.get("transform", global_transform)
+    groups_cfg = spec.get("groups")
+    if groups_cfg is None:
+        groups = (resolve_selection_spec(spec, info, f"rmb_mappings.{target}", inherited_source=None, inherited_transform=global_transform),)
+    else:
+        if not isinstance(groups_cfg, list) or not groups_cfg:
+            raise ValueError(f"rmb_mappings.{target}.groups must be a non-empty list.")
+        groups = tuple(
+            resolve_selection_spec(
+                group_cfg,
+                info,
+                f"rmb_mappings.{target}.groups[{index}]",
+                inherited_source=inherited_source,
+                inherited_transform=inherited_transform,
+            )
+            for index, group_cfg in enumerate(groups_cfg)
+        )
+
+    operation = str(spec.get("operation", "concat")).strip()
+    if operation not in {"concat", "xyz_pair_distance"}:
+        raise ValueError(f"rmb_mappings.{target}.operation must be one of: concat, xyz_pair_distance.")
+    if operation == "xyz_pair_distance":
+        if len(groups) % 2 != 0:
+            raise ValueError(f"rmb_mappings.{target}.operation=xyz_pair_distance requires an even number of groups.")
+        for index, group in enumerate(groups):
+            if group.dim != 3:
+                raise ValueError(
+                    f"rmb_mappings.{target}.groups[{index}] must select exactly x/y/z for xyz_pair_distance."
+                )
+
+    return TargetMapping(target=str(target), groups=groups, operation=operation)
+
+
+def parse_default_target_policies(config):
+    if config is None:
+        return {}
+    if not isinstance(config, dict):
+        raise ValueError("default_targets in mapping config must be an object.")
+
+    supported_targets = {"measured_joint_pos", "command_joint_pos"}
+    supported_policies = {"auto", "remaining", "empty"}
+    policies = {}
+    for target, policy in config.items():
+        target = str(target)
+        policy = str(policy).strip().lower()
+        if target not in supported_targets:
+            raise ValueError(
+                f"default_targets.{target} is not supported. "
+                f"Supported targets: {', '.join(sorted(supported_targets))}"
+            )
+        if policy not in supported_policies:
+            raise ValueError(
+                f"default_targets.{target} must be one of: {', '.join(sorted(supported_policies))}"
+            )
+        policies[target] = policy
+    return policies
+
+
+def resolve_mapping_config(info, raw_mapping_config, mapping_config_path=None):
+    raw_mapping_config = raw_mapping_config or {}
+    vector_layout_overrides = parse_vector_layout_overrides(raw_mapping_config.get("vector_layout"))
+    eef_transform = parse_axis_transform(raw_mapping_config.get("eef_transform"), "eef_transform")
+
+    robot_layout_overrides = raw_mapping_config.get("robot_layout")
+    if robot_layout_overrides is None:
+        robot_layout_overrides = {}
+    if not isinstance(robot_layout_overrides, dict):
+        raise ValueError("robot_layout in mapping config must be an object.")
+
+    target_mappings = {}
+    mappings_cfg = raw_mapping_config.get("rmb_mappings")
+    if mappings_cfg is not None:
+        if not isinstance(mappings_cfg, dict):
+            raise ValueError("rmb_mappings in mapping config must be an object.")
+        for target, spec in mappings_cfg.items():
+            target_name = str(target)
+            target_mappings[target_name] = resolve_target_mapping(
+                target_name,
+                spec,
+                info,
+                global_transform=eef_transform if target_name in EEF_TARGETS else None,
+            )
+
+    return MappingConfig(
+        path=str(Path(mapping_config_path).expanduser().resolve()) if mapping_config_path else None,
+        vector_layout_overrides=vector_layout_overrides,
+        robot_layout_overrides=robot_layout_overrides,
+        default_target_policies=parse_default_target_policies(raw_mapping_config.get("default_targets")),
+        target_mappings=target_mappings,
+        eef_transform=eef_transform,
+    )
+
+
+def parse_range_slice(spec):
+    if spec is None:
         return None
     try:
-        start = int(spec["start"])
-        end = int(spec["end"])
-    except (TypeError, ValueError):
+        return parse_slice_spec(spec, "range slice")
+    except ValueError:
         return None
-    if start < 0 or end < start:
-        return None
-    return slice(start, end)
 
 
 def slice_length(slice_obj):
@@ -432,15 +828,24 @@ def slice_length(slice_obj):
     return max(0, int(slice_obj.stop) - int(slice_obj.start))
 
 
-def resolve_vector_layout(info, modality):
+def resolve_vector_layout(info, modality, overrides=None):
     state_cfg = modality.get("state") if isinstance(modality, dict) else None
     action_cfg = modality.get("action") if isinstance(modality, dict) else None
+    overrides = overrides or {}
 
     return VectorLayout(
-        qpos_slice=parse_range_slice(state_cfg.get("qpos")) if isinstance(state_cfg, dict) else None,
-        qvel_slice=parse_range_slice(state_cfg.get("qvel")) if isinstance(state_cfg, dict) else None,
-        effort_slice=parse_range_slice(state_cfg.get("effort")) if isinstance(state_cfg, dict) else None,
-        action_slice=parse_range_slice(action_cfg.get("qpos")) if isinstance(action_cfg, dict) else None,
+        qpos_slice=overrides["qpos"] if "qpos" in overrides else (
+            parse_range_slice(state_cfg.get("qpos")) if isinstance(state_cfg, dict) else None
+        ),
+        qvel_slice=overrides["qvel"] if "qvel" in overrides else (
+            parse_range_slice(state_cfg.get("qvel")) if isinstance(state_cfg, dict) else None
+        ),
+        effort_slice=overrides["effort"] if "effort" in overrides else (
+            parse_range_slice(state_cfg.get("effort")) if isinstance(state_cfg, dict) else None
+        ),
+        action_slice=overrides["action"] if "action" in overrides else (
+            parse_range_slice(action_cfg.get("qpos")) if isinstance(action_cfg, dict) else None
+        ),
     )
 
 
@@ -456,7 +861,7 @@ def resolve_action_dim(info, vector_layout):
     action_dim = slice_length(vector_layout.action_slice)
     if action_dim is not None and action_dim > 0:
         return action_dim
-    return get_feature_shape_dim(info, "action")
+    return get_feature_shape_dim(info, "action") or 0
 
 
 def collect_eef_target_candidates(robot_urdf):
@@ -490,8 +895,12 @@ def collect_eef_target_candidates(robot_urdf):
 
 def parse_int_list(raw_value, arg_name):
     values = []
-    for item in str(raw_value).split(","):
-        item = item.strip()
+    if isinstance(raw_value, (list, tuple)):
+        items = raw_value
+    else:
+        items = str(raw_value).split(",")
+    for item in items:
+        item = str(item).strip()
         if not item:
             continue
         try:
@@ -504,6 +913,10 @@ def parse_int_list(raw_value, arg_name):
 
 
 def parse_optional_int_list(raw_value, arg_name):
+    if raw_value is None:
+        return tuple()
+    if isinstance(raw_value, (list, tuple)):
+        return tuple(sorted(parse_int_list(raw_value, arg_name)))
     text = str(raw_value).strip().lower()
     if text in {"", "none", "null", "no", "false"}:
         return tuple()
@@ -511,7 +924,10 @@ def parse_optional_int_list(raw_value, arg_name):
 
 
 def parse_string_list(raw_value):
-    values = [item.strip() for item in str(raw_value).split(",") if item.strip()]
+    if isinstance(raw_value, (list, tuple)):
+        values = [str(item).strip() for item in raw_value if str(item).strip()]
+    else:
+        values = [item.strip() for item in str(raw_value).split(",") if item.strip()]
     if not values:
         raise ValueError("Expected at least one non-empty value.")
     return tuple(values)
@@ -829,100 +1245,728 @@ def list_parquet_columns(parquet_path):
     return tuple((field.name, str(field.type)) for field in schema)
 
 
-def build_mapping_lines(info, vector_layout, robot_layout):
-    action_dim = resolve_action_dim(info, vector_layout)
-    action_names = extract_action_names(info, vector_layout, action_dim) if action_dim is not None else None
-    qpos_dim = slice_length(vector_layout.qpos_slice) or action_dim
-    video_specs = list_video_specs(info)
+def inspect_parquet_vector_dims(parquet_path):
+    column_names = pq.ParquetFile(parquet_path).schema_arrow.names
+    target_columns = [name for name in ("observation.state", "action") if name in column_names]
+    if not target_columns:
+        return tuple()
 
-    lines = []
-    lines.append(
-        f"observation.state[{format_slice(vector_layout.qpos_slice)}]"
-        f" -> measured_joint_pos"
-        + (f" ({qpos_dim} dims)" if qpos_dim is not None else "")
-    )
+    table = pq.read_table(parquet_path, columns=target_columns).slice(0, 1)
+    dims = []
+    for column_name in target_columns:
+        column = table[column_name]
+        if len(column) == 0:
+            continue
+        value = column[0].as_py()
+        if isinstance(value, list):
+            dims.append((column_name, len(value)))
+    return tuple(dims)
 
-    if vector_layout.qvel_slice is not None:
-        lines.append(f"observation.state[{format_slice(vector_layout.qvel_slice)}] -> measured_joint_vel")
-    else:
-        lines.append("observation.state[qvel] -> measured_joint_vel (zero-filled when absent)")
 
-    if vector_layout.effort_slice is not None:
-        lines.append(
-            f"observation.state[{format_slice(vector_layout.effort_slice)}] -> measured_eef_wrench "
-            "(per-arm first min(6, fk_dim) dims)"
-        )
-    else:
-        lines.append("observation.state[effort] -> measured_eef_wrench (zero-filled when absent)")
+def summarize_names(names, max_items=8):
+    if not isinstance(names, (list, tuple)) or not names:
+        return None
+    labels = [str(name) for name in names]
+    if len(labels) <= max_items:
+        return ", ".join(labels)
+    return ", ".join(labels[:max_items]) + f", ... ({len(labels)} total)"
 
-    lines.append(
-        f"action[{format_slice(vector_layout.action_slice)}] -> command_joint_pos"
-        + (f" ({action_dim} dims)" if action_dim is not None else "")
-    )
 
-    if robot_layout.gripper_indices:
-        lines.append(
-            f"joint dims {robot_layout.gripper_indices} -> "
-            "measured_gripper_joint_pos / command_gripper_joint_pos"
-        )
-    else:
-        lines.append("gripper joints -> none")
+def summarize_field_descriptions(field_descriptions, max_items=8):
+    if not isinstance(field_descriptions, dict) or not field_descriptions:
+        return None
 
-    fk_pairs = list(zip(robot_layout.arm_slices, robot_layout.arm_fk_dims, robot_layout.eef_target_links))
-    fk_parts = []
-    for arm_index, (arm_slice, fk_dim, target_link) in enumerate(fk_pairs):
-        if fk_dim <= 0 or target_link is None:
-            fk_parts.append(f"arm{arm_index}[{arm_slice.start}:{arm_slice.stop}] => zero EEF")
-        else:
-            fk_parts.append(
-                f"arm{arm_index}[{arm_slice.start}:{arm_slice.stop}] "
-                f"fk={fk_dim} -> {target_link}"
-            )
-    lines.append(
-        "; ".join(fk_parts)
-        + " -> measured_eef_pose / command_eef_pose"
-    )
+    rows = []
+    for field_key, field_spec in field_descriptions.items():
+        if not isinstance(field_spec, dict):
+            continue
+        indices = field_spec.get("indices")
+        if not isinstance(indices, list) or not indices:
+            continue
+        try:
+            index_text = ",".join(str(int(index)) for index in indices)
+        except (TypeError, ValueError):
+            continue
+        label = field_spec.get("description") or str(field_key).split("/")[-1]
+        rows.append((tuple(indices), f"[{index_text}] {label}"))
 
-    if "timestamp" in info_features(info):
-        lines.append("timestamp -> time")
-    else:
-        lines.append("timestamp -> time (derived from fps/sample index when absent)")
+    if not rows:
+        return None
 
-    lines.append("task_index + meta/tasks.jsonl + meta/episodes.jsonl -> task_desc")
+    rows.sort(key=lambda item: item[0])
+    labels = [label for _, label in rows]
+    if len(labels) <= max_items:
+        return "; ".join(labels)
+    return "; ".join(labels[:max_items]) + f"; ... ({len(labels)} total)"
 
-    if video_specs:
-        for spec in video_specs:
-            suffix = "depth_image" if spec["is_depth"] else "rgb_image"
-            lines.append(f"{spec['feature_key']} -> {spec['camera_name']}_{suffix}.rmb.mp4")
-    else:
-        lines.append("observation.images.* -> no video export")
 
-    if action_names:
-        lines.append("action joint names: " + ", ".join(action_names))
+def feature_summary_lines(feature_key, feature_spec):
+    if not isinstance(feature_spec, dict):
+        return [f"{feature_key}"]
+
+    lines = [
+        f"{feature_key} (dtype={feature_spec.get('dtype', '?')}, shape={feature_spec.get('shape', '?')})"
+    ]
+
+    names_summary = summarize_names(feature_spec.get("names"))
+    if names_summary is not None:
+        lines.append(f"names: {names_summary}")
+
+    field_summary = summarize_field_descriptions(feature_spec.get("field_descriptions"))
+    if field_summary is not None:
+        lines.append(f"fields: {field_summary}")
+
+    video_info = feature_spec.get("video_info") or feature_spec.get("info")
+    if isinstance(video_info, dict) and video_info:
+        info_text = ", ".join(f"{key}={value}" for key, value in video_info.items())
+        lines.append(f"video: {info_text}")
 
     return lines
 
 
-def print_dataset_mapping_summary(dataset_name, info, vector_layout, robot_layout, parquet_columns=None):
-    print(f"\n🧾 LeRobot keys: {dataset_name}")
+def describe_selection(selection):
+    if selection.field_names is not None:
+        selector = summarize_names(selection.field_names, max_items=12) or ", ".join(selection.field_names)
+    else:
+        selector = selection.selector_text
+    suffix = f" transform={selection.transform.text}" if selection.transform is not None else ""
+    return f"{selection.source}[{selector}]{suffix}"
+
+
+def describe_target_mapping(mapping):
+    description = " + ".join(describe_selection(group) for group in mapping.groups)
+    if mapping.operation != "concat":
+        return f"{mapping.operation}({description})"
+    return description
+
+
+def get_target_mapping(mapping_config, target):
+    if mapping_config is None:
+        return None
+    return mapping_config.target_mappings.get(target)
+
+
+def get_target_policy(mapping_config, target, default="auto"):
+    if mapping_config is None:
+        return default
+    return mapping_config.default_target_policies.get(target, default)
+
+
+def get_feature_dim_or_zero(info, feature_key):
+    return get_feature_shape_dim(info, feature_key) or 0
+
+
+def mapped_indices_for_source(mapping_config, source, target_prefix):
+    if mapping_config is None:
+        return set()
+
+    indices = set()
+    for target, mapping in mapping_config.target_mappings.items():
+        if not target.startswith(target_prefix):
+            continue
+        for group in mapping.groups:
+            if group.source == source:
+                indices.update(group.indices)
+    return indices
+
+
+def describe_default_target_policy(info, mapping_config, target, source, total_dim, target_prefix):
+    policy = get_target_policy(mapping_config, target)
+    if policy == "auto":
+        return None
+
+    used = mapped_indices_for_source(mapping_config, source, target_prefix)
+    if policy == "remaining":
+        remaining = [index for index in range(total_dim) if index not in used]
+        return f"{source}[remaining: {len(remaining)} dims] -> {target} (default={policy})"
+    if policy == "empty":
+        return f"{source}[none] -> {target} (0 dims, default={policy})"
+    return None
+
+
+def list_unmapped_source_fields(info, mapping_config, source, target_prefix):
+    if mapping_config is None or not mapping_config.target_mappings:
+        return None
+    total_dim = get_feature_dim_or_zero(info, source)
+    if total_dim <= 0:
+        return None
+
+    used = mapped_indices_for_source(mapping_config, source, target_prefix)
+    unmapped = [index for index in range(total_dim) if index not in used]
+    if not unmapped:
+        return None
+
+    names = source_feature_names(info, source)
+    if names is not None and len(names) == total_dim:
+        labels = [str(names[index]) for index in unmapped]
+    else:
+        labels = [str(index) for index in unmapped]
+
+    return summarize_names(labels, max_items=12) or ", ".join(labels)
+
+
+def mapping_output_names(target):
+    outputs = {
+        "measured_joint_pos": ("measured_joint_pos", "measured_joint_pos_rel"),
+        "command_joint_pos": ("command_joint_pos", "command_joint_pos_rel"),
+        "measured_joint_pos_rel": ("measured_joint_pos_rel",),
+        "command_joint_pos_rel": ("command_joint_pos_rel",),
+        "measured_gripper_joint_pos": ("measured_gripper_joint_pos", "measured_gripper_joint_pos_rel"),
+        "command_gripper_joint_pos": ("command_gripper_joint_pos", "command_gripper_joint_pos_rel"),
+        "measured_gripper_joint_pos_rel": ("measured_gripper_joint_pos_rel",),
+        "command_gripper_joint_pos_rel": ("command_gripper_joint_pos_rel",),
+        "measured_eef_pose": ("measured_eef_pose", "measured_eef_pose_rel"),
+        "command_eef_pose": ("command_eef_pose", "command_eef_pose_rel"),
+        "measured_eef_pose_rel": ("measured_eef_pose_rel",),
+        "command_eef_pose_rel": ("command_eef_pose_rel",),
+        "measured_joint_vel": ("measured_joint_vel",),
+        "measured_eef_wrench": ("measured_eef_wrench",),
+        "time": ("time",),
+        "task_desc": ("task_desc attribute",),
+    }
+    return outputs.get(target, (target,))
+
+
+def format_mapping_block(title, details):
+    lines = [title]
+    for label, value in details:
+        if value is None or value == "":
+            continue
+        lines.append(f"{label}: {value}")
+    return "\n".join(lines)
+
+
+def summarize_fk_mapping(robot_layout):
+    fk_parts = []
+    for arm_index, (arm_slice, fk_dim, target_link) in enumerate(
+        zip(robot_layout.arm_slices, robot_layout.arm_fk_dims, robot_layout.eef_target_links)
+    ):
+        if fk_dim <= 0 or target_link is None:
+            fk_parts.append(f"arm{arm_index}[{arm_slice.start}:{arm_slice.stop}] => zero EEF")
+        else:
+            fk_parts.append(
+                f"arm{arm_index}[{arm_slice.start}:{arm_slice.stop}] fk={fk_dim} -> {target_link}"
+            )
+    return "; ".join(fk_parts)
+
+
+def summarize_default_target(info, vector_layout, mapping_config, target, source, target_prefix, auto_selector, auto_dim):
+    policy = get_target_policy(mapping_config, target)
+    if policy == "remaining":
+        total_dim = get_feature_dim_or_zero(info, source)
+        used = mapped_indices_for_source(mapping_config, source, target_prefix)
+        remaining = [index for index in range(total_dim) if index not in used]
+        return f"{source}[remaining]", len(remaining), f"default={policy}"
+    if policy == "empty":
+        return f"{source}[none]", 0, f"default={policy}"
+    return f"{source}[{auto_selector}]", auto_dim, "default=auto"
+
+
+def effective_target_dim(info, vector_layout, mapping_config, target, source, target_prefix, auto_selector, auto_dim):
+    target_mapping = get_target_mapping(mapping_config, target)
+    if target_mapping is not None:
+        return target_mapping.dim
+    _, dim, _ = summarize_default_target(
+        info,
+        vector_layout,
+        mapping_config,
+        target=target,
+        source=source,
+        target_prefix=target_prefix,
+        auto_selector=auto_selector,
+        auto_dim=auto_dim,
+    )
+    return dim or 0
+
+
+def build_mapping_lines(info, vector_layout, robot_layout, mapping_config=None):
+    action_dim = resolve_action_dim(info, vector_layout)
+    action_names = extract_action_names(info, vector_layout, action_dim) if action_dim is not None else None
+    qpos_dim = slice_length(vector_layout.qpos_slice) or action_dim
+    measured_joint_pos_dim = effective_target_dim(
+        info,
+        vector_layout,
+        mapping_config,
+        target="measured_joint_pos",
+        source="observation.state",
+        target_prefix="measured_",
+        auto_selector=format_slice(vector_layout.qpos_slice),
+        auto_dim=qpos_dim,
+    )
+    video_specs = list_video_specs(info)
+
+    lines = []
+
+    measured_joint_pos_mapping = get_target_mapping(mapping_config, "measured_joint_pos")
+    if measured_joint_pos_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_joint_pos",
+                [
+                    ("source", describe_target_mapping(measured_joint_pos_mapping)),
+                    ("dims", f"{measured_joint_pos_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_joint_pos"))),
+                ],
+            )
+        )
+    else:
+        source_text, dim_text, mode_text = summarize_default_target(
+            info,
+            vector_layout,
+            mapping_config,
+            target="measured_joint_pos",
+            source="observation.state",
+            target_prefix="measured_",
+            auto_selector=format_slice(vector_layout.qpos_slice),
+            auto_dim=qpos_dim,
+        )
+        lines.append(
+            format_mapping_block(
+                "measured_joint_pos",
+                [
+                    ("source", source_text),
+                    ("dims", str(dim_text) if dim_text is not None else None),
+                    ("mode", mode_text),
+                    ("writes", ", ".join(mapping_output_names("measured_joint_pos"))),
+                ],
+            )
+        )
+
+    measured_joint_vel_mapping = get_target_mapping(mapping_config, "measured_joint_vel")
+    if measured_joint_vel_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_joint_vel",
+                [
+                    ("source", describe_target_mapping(measured_joint_vel_mapping)),
+                    ("dims", f"{measured_joint_vel_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_joint_vel"))),
+                ],
+            )
+        )
+    else:
+        if vector_layout.qvel_slice is not None:
+            lines.append(
+                format_mapping_block(
+                    "measured_joint_vel",
+                    [
+                        ("source", f"observation.state[{format_slice(vector_layout.qvel_slice)}]"),
+                        ("dims", str(slice_length(vector_layout.qvel_slice))),
+                        ("mode", "default=auto"),
+                        ("writes", ", ".join(mapping_output_names("measured_joint_vel"))),
+                    ],
+                )
+            )
+        else:
+            lines.append(
+                format_mapping_block(
+                    "measured_joint_vel",
+                    [
+                        ("source", "none"),
+                        ("dims", str(measured_joint_pos_dim)),
+                        ("mode", "zero-filled when absent"),
+                        ("writes", ", ".join(mapping_output_names("measured_joint_vel"))),
+                    ],
+                )
+            )
+
+    measured_wrench_mapping = get_target_mapping(mapping_config, "measured_eef_wrench")
+    if measured_wrench_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_eef_wrench",
+                [
+                    ("source", describe_target_mapping(measured_wrench_mapping)),
+                    ("dims", f"{measured_wrench_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_eef_wrench"))),
+                ],
+            )
+        )
+    else:
+        if vector_layout.effort_slice is not None:
+            lines.append(
+                format_mapping_block(
+                    "measured_eef_wrench",
+                    [
+                        ("source", f"observation.state[{format_slice(vector_layout.effort_slice)}]"),
+                        ("dims", f"{6 * len(robot_layout.arm_slices)} output dims"),
+                        ("mode", "default=auto from effort; per arm first min(6, fk_dim) dims"),
+                        ("writes", ", ".join(mapping_output_names("measured_eef_wrench"))),
+                    ],
+                )
+            )
+        else:
+            lines.append(
+                format_mapping_block(
+                    "measured_eef_wrench",
+                    [
+                        ("source", "none"),
+                        ("dims", f"{6 * len(robot_layout.arm_slices)} output dims"),
+                        ("mode", "zero-filled when absent"),
+                        ("writes", ", ".join(mapping_output_names("measured_eef_wrench"))),
+                    ],
+                )
+            )
+
+    command_joint_pos_mapping = get_target_mapping(mapping_config, "command_joint_pos")
+    if command_joint_pos_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "command_joint_pos",
+                [
+                    ("source", describe_target_mapping(command_joint_pos_mapping)),
+                    ("dims", f"{command_joint_pos_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("command_joint_pos"))),
+                ],
+            )
+        )
+    else:
+        source_text, dim_text, mode_text = summarize_default_target(
+            info,
+            vector_layout,
+            mapping_config,
+            target="command_joint_pos",
+            source="action",
+            target_prefix="command_",
+            auto_selector=format_slice(vector_layout.action_slice),
+            auto_dim=action_dim,
+        )
+        lines.append(
+            format_mapping_block(
+                "command_joint_pos",
+                [
+                    ("source", source_text),
+                    ("dims", str(dim_text) if dim_text is not None else None),
+                    ("mode", mode_text),
+                    ("writes", ", ".join(mapping_output_names("command_joint_pos"))),
+                ],
+            )
+        )
+
+    measured_gripper_mapping = get_target_mapping(mapping_config, "measured_gripper_joint_pos")
+    command_gripper_mapping = get_target_mapping(mapping_config, "command_gripper_joint_pos")
+    measured_gripper_rel_mapping = get_target_mapping(mapping_config, "measured_gripper_joint_pos_rel")
+    command_gripper_rel_mapping = get_target_mapping(mapping_config, "command_gripper_joint_pos_rel")
+    if measured_gripper_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_gripper_joint_pos",
+                [
+                    ("source", describe_target_mapping(measured_gripper_mapping)),
+                    ("dims", f"{measured_gripper_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_gripper_joint_pos"))),
+                ],
+            )
+        )
+    if command_gripper_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "command_gripper_joint_pos",
+                [
+                    ("source", describe_target_mapping(command_gripper_mapping)),
+                    ("dims", f"{command_gripper_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("command_gripper_joint_pos"))),
+                ],
+            )
+        )
+    if measured_gripper_rel_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_gripper_joint_pos_rel",
+                [
+                    ("source", describe_target_mapping(measured_gripper_rel_mapping)),
+                    ("dims", f"{measured_gripper_rel_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_gripper_joint_pos_rel"))),
+                ],
+            )
+        )
+    if command_gripper_rel_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "command_gripper_joint_pos_rel",
+                [
+                    ("source", describe_target_mapping(command_gripper_rel_mapping)),
+                    ("dims", f"{command_gripper_rel_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("command_gripper_joint_pos_rel"))),
+                ],
+            )
+        )
+    if measured_gripper_mapping is None and command_gripper_mapping is None:
+        if robot_layout.gripper_indices:
+            lines.append(
+                format_mapping_block(
+                    "measured_gripper_joint_pos / command_gripper_joint_pos",
+                    [
+                        ("source", f"joint dims {robot_layout.gripper_indices} extracted from measured/command joint targets"),
+                        ("dims", str(len(robot_layout.gripper_indices))),
+                        ("mode", "default=auto"),
+                        ("writes", ", ".join(mapping_output_names("measured_gripper_joint_pos") + mapping_output_names("command_gripper_joint_pos"))),
+                    ],
+                )
+            )
+        else:
+            lines.append(
+                format_mapping_block(
+                    "measured_gripper_joint_pos / command_gripper_joint_pos",
+                    [
+                        ("source", "none"),
+                        ("dims", "0"),
+                        ("mode", "no gripper joints configured"),
+                    ],
+                )
+            )
+
+    measured_eef_mapping = get_target_mapping(mapping_config, "measured_eef_pose")
+    command_eef_mapping = get_target_mapping(mapping_config, "command_eef_pose")
+    measured_eef_rel_mapping = get_target_mapping(mapping_config, "measured_eef_pose_rel")
+    command_eef_rel_mapping = get_target_mapping(mapping_config, "command_eef_pose_rel")
+    if measured_eef_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_eef_pose",
+                [
+                    ("source", describe_target_mapping(measured_eef_mapping)),
+                    ("dims", f"{measured_eef_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("measured_eef_pose"))),
+                ],
+            )
+        )
+    if command_eef_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "command_eef_pose",
+                [
+                    ("source", describe_target_mapping(command_eef_mapping)),
+                    ("dims", f"{command_eef_mapping.dim}"),
+                    ("mode", "configured"),
+                    ("writes", ", ".join(mapping_output_names("command_eef_pose"))),
+                ],
+            )
+        )
+    if measured_eef_rel_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "measured_eef_pose_rel",
+                [
+                    ("source", describe_target_mapping(measured_eef_rel_mapping)),
+                    ("dims", f"{measured_eef_rel_mapping.dim} input dims"),
+                    ("mode", "configured; 7D relative pose groups are converted to 6D RMB deltas"),
+                    ("writes", ", ".join(mapping_output_names("measured_eef_pose_rel"))),
+                ],
+            )
+        )
+    if command_eef_rel_mapping is not None:
+        lines.append(
+            format_mapping_block(
+                "command_eef_pose_rel",
+                [
+                    ("source", describe_target_mapping(command_eef_rel_mapping)),
+                    ("dims", f"{command_eef_rel_mapping.dim} input dims"),
+                    ("mode", "configured; 7D relative pose groups are converted to 6D RMB deltas"),
+                    ("writes", ", ".join(mapping_output_names("command_eef_pose_rel"))),
+                ],
+            )
+        )
+    if measured_eef_mapping is None and command_eef_mapping is None:
+        lines.append(
+            format_mapping_block(
+                "measured_eef_pose / command_eef_pose",
+                [
+                    ("source", summarize_fk_mapping(robot_layout)),
+                    ("dims", f"{7 * len(robot_layout.arm_slices)} output dims"),
+                    ("mode", "default=FK / zero EEF when fk_dim<=0"),
+                    ("writes", ", ".join(mapping_output_names("measured_eef_pose") + mapping_output_names("command_eef_pose"))),
+                ],
+            )
+        )
+    else:
+        if measured_eef_mapping is None:
+            lines.append(
+                format_mapping_block(
+                    "measured_eef_pose",
+                    [
+                        ("source", summarize_fk_mapping(robot_layout)),
+                        ("dims", f"{7 * len(robot_layout.arm_slices)} output dims"),
+                        ("mode", "default=FK / zero EEF when fk_dim<=0"),
+                        ("writes", ", ".join(mapping_output_names("measured_eef_pose"))),
+                    ],
+                )
+            )
+        if command_eef_mapping is None:
+            command_source = summarize_fk_mapping(robot_layout)
+            command_mode = "default=FK / zero EEF when fk_dim<=0"
+            if command_eef_rel_mapping is not None and measured_eef_mapping is not None:
+                command_source = "measured_eef_pose + configured command_eef_pose_rel integration"
+                command_mode = "derived from relative command"
+            lines.append(
+                format_mapping_block(
+                    "command_eef_pose",
+                    [
+                        ("source", command_source),
+                        ("dims", f"{7 * len(robot_layout.arm_slices)} output dims"),
+                        ("mode", command_mode),
+                        ("writes", ", ".join(mapping_output_names("command_eef_pose"))),
+                    ],
+                )
+            )
+
+    if "timestamp" in info_features(info):
+        lines.append(
+            format_mapping_block(
+                "time",
+                [
+                    ("source", "timestamp"),
+                    ("mode", "direct"),
+                    ("writes", ", ".join(mapping_output_names("time"))),
+                ],
+            )
+        )
+    else:
+        lines.append(
+            format_mapping_block(
+                "time",
+                [
+                    ("source", "timestamp missing"),
+                    ("mode", "derived from fps and sample index"),
+                    ("writes", ", ".join(mapping_output_names("time"))),
+                ],
+            )
+        )
+
+    lines.append(
+        format_mapping_block(
+            "task_desc",
+            [
+                ("source", "task_index + meta/tasks.jsonl + meta/episodes.jsonl"),
+                ("mode", "episode attribute"),
+                ("writes", ", ".join(mapping_output_names("task_desc"))),
+            ],
+        )
+    )
+
+    if video_specs:
+        for spec in video_specs:
+            suffix = "depth_image" if spec["is_depth"] else "rgb_image"
+            lines.append(
+                format_mapping_block(
+                    f"{spec['camera_name']}_{suffix}.rmb.mp4",
+                    [
+                        ("source", spec["feature_key"]),
+                        ("mode", "video export"),
+                    ],
+                )
+            )
+    else:
+        lines.append(
+            format_mapping_block(
+                "video export",
+                [
+                    ("source", "observation.images.*"),
+                    ("mode", "no video features found"),
+                ],
+            )
+        )
+
+    if action_names:
+        lines.append(
+            format_mapping_block(
+                "action field order",
+                [
+                    ("fields", ", ".join(action_names)),
+                    ("dims", str(len(action_names))),
+                ],
+            )
+        )
+
+    action_unmapped = list_unmapped_source_fields(info, mapping_config, "action", "command_")
+    if action_unmapped:
+        lines.append(
+            format_mapping_block(
+                "action unmapped fields",
+                [
+                    ("fields", action_unmapped),
+                ],
+            )
+        )
+
+    observation_unmapped = list_unmapped_source_fields(info, mapping_config, "observation.state", "measured_")
+    if observation_unmapped:
+        lines.append(
+            format_mapping_block(
+                "observation.state unmapped fields",
+                [
+                    ("fields", observation_unmapped),
+                ],
+            )
+        )
+
+    return lines
+
+
+def print_dataset_mapping_summary(dataset_name, info, vector_layout, robot_layout, mapping_config=None, parquet_columns=None, parquet_vector_dims=None):
+    features = []
     for feature_key, feature_spec in info_features(info).items():
-        dtype = feature_spec.get("dtype", "?") if isinstance(feature_spec, dict) else "?"
-        shape = feature_spec.get("shape", "?") if isinstance(feature_spec, dict) else "?"
-        print(f"  - {feature_key} (dtype={dtype}, shape={shape})")
+        summary_lines = feature_summary_lines(feature_key, feature_spec)
+        if isinstance(feature_spec, dict):
+            video_info = feature_spec.get("video_info") or feature_spec.get("info")
+            features.append(
+                {
+                    "key": feature_key,
+                    "dtype": feature_spec.get("dtype"),
+                    "shape": feature_spec.get("shape"),
+                    "names": summarize_names(feature_spec.get("names")),
+                    "fields": summarize_field_descriptions(feature_spec.get("field_descriptions")),
+                    "video": video_info if isinstance(video_info, dict) and video_info else None,
+                    "summary": summary_lines,
+                }
+            )
+        else:
+            features.append({"key": feature_key, "summary": summary_lines})
 
-    if parquet_columns is not None:
-        print("🧱 Parquet schema:")
-        for column_name, column_type in parquet_columns:
-            print(f"  - {column_name} ({column_type})")
+    mappings = []
+    for block in build_mapping_lines(info, vector_layout, robot_layout, mapping_config=mapping_config):
+        block_lines = block.splitlines()
+        if not block_lines:
+            continue
+        mapping = {"target": block_lines[0]}
+        for line in block_lines[1:]:
+            label, sep, value = line.partition(":")
+            if sep:
+                mapping[label.strip()] = value.strip()
+        mappings.append(mapping)
 
-    print("🔁 LeRobot -> RMB mapping:")
-    for line in build_mapping_lines(info, vector_layout, robot_layout):
-        print(f"  - {line}")
+    summary = {
+        "dataset": dataset_name,
+        "lerobot_keys": features,
+        "parquet_schema": [
+            {"column": column_name, "type": str(column_type)}
+            for column_name, column_type in (parquet_columns or [])
+        ],
+        "parquet_sample_dims": [
+            {"column": column_name, "dim": dim}
+            for column_name, dim in (parquet_vector_dims or [])
+        ],
+        "lerobot_to_rmb_mapping": mappings,
+    }
+
+    with open(f"{dataset_name}_summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2, default=str)
 
 
 def load_dataset_bundle(
     dataset_dir,
     robot_urdf,
+    raw_mapping_config=None,
+    mapping_config_path=None,
     arm_joint_dims=None,
     gripper_indices=None,
     arm_fk_dims=None,
@@ -932,20 +1976,22 @@ def load_dataset_bundle(
     dataset_dir = Path(dataset_dir).expanduser().resolve()
     dataset_name = dataset_dir.name
     info, episodes_meta, tasks_by_index, modality = load_dataset_metadata(dataset_dir)
-    vector_layout = resolve_vector_layout(info, modality)
+    mapping_config = resolve_mapping_config(info, raw_mapping_config, mapping_config_path=mapping_config_path)
+    vector_layout = resolve_vector_layout(info, modality, overrides=mapping_config.vector_layout_overrides)
     robot_layout = resolve_robot_layout(
         info=info,
         robot_urdf=robot_urdf,
         vector_layout=vector_layout,
-        arm_joint_dims=arm_joint_dims,
-        gripper_indices=gripper_indices,
-        arm_fk_dims=arm_fk_dims,
-        eef_target_links=eef_target_links,
-        robot_name=robot_name,
+        arm_joint_dims=arm_joint_dims if arm_joint_dims is not None else mapping_config.robot_layout_overrides.get("arm_joint_dims"),
+        gripper_indices=gripper_indices if gripper_indices is not None else mapping_config.robot_layout_overrides.get("gripper_indices"),
+        arm_fk_dims=arm_fk_dims if arm_fk_dims is not None else mapping_config.robot_layout_overrides.get("arm_fk_dims"),
+        eef_target_links=eef_target_links if eef_target_links is not None else mapping_config.robot_layout_overrides.get("eef_target_links"),
+        robot_name=robot_name if robot_name is not None else mapping_config.robot_layout_overrides.get("robot_name"),
     )
     parquet_files = tuple(list_episode_parquet_files(dataset_dir))
     video_specs = tuple(list_video_specs(info))
     parquet_columns = list_parquet_columns(parquet_files[0]) if parquet_files else tuple()
+    parquet_vector_dims = inspect_parquet_vector_dims(parquet_files[0]) if parquet_files else tuple()
 
     return DatasetBundle(
         dataset_dir=dataset_dir,
@@ -955,14 +2001,20 @@ def load_dataset_bundle(
         tasks_by_index=tasks_by_index,
         vector_layout=vector_layout,
         robot_layout=robot_layout,
+        mapping_config=mapping_config,
         parquet_files=parquet_files,
         parquet_columns=parquet_columns,
+        parquet_vector_dims=parquet_vector_dims,
         video_specs=video_specs,
     )
 
 
 def print_dataset_overview(bundle):
     print(f"\n📦 Processing dataset: {bundle.dataset_name}")
+    if bundle.mapping_config.path is not None:
+        print(f"🗺️  Mapping config: {bundle.mapping_config.path}")
+    if bundle.mapping_config.eef_transform is not None:
+        print(f"🧭 EEF transform: {bundle.mapping_config.eef_transform.text}")
     print(
         "🤖 Robot layout: "
         f"arms={bundle.robot_layout.arm_joint_dims}, "
@@ -991,11 +2043,13 @@ def print_dataset_overview(bundle):
         bundle.info,
         bundle.vector_layout,
         bundle.robot_layout,
+        mapping_config=bundle.mapping_config,
         parquet_columns=bundle.parquet_columns,
+        parquet_vector_dims=bundle.parquet_vector_dims,
     )
 
 
-def build_episode_jobs(bundle, out_dir, requested_fps, camera_workers, video_preset, robot_urdf):
+def build_episode_jobs(bundle, out_dir, requested_fps, camera_workers, video_preset, robot_urdf, skip_static_eef=False):
     out_dir = Path(out_dir).expanduser().resolve()
     return [
         EpisodeJob(
@@ -1012,7 +2066,9 @@ def build_episode_jobs(bundle, out_dir, requested_fps, camera_workers, video_pre
             video_preset=video_preset,
             robot_urdf=str(robot_urdf),
             robot_layout=bundle.robot_layout,
+            mapping_config=bundle.mapping_config,
             video_specs=bundle.video_specs,
+            skip_static_eef=skip_static_eef,
         )
         for parquet_path in bundle.parquet_files
     ]
@@ -1051,6 +2107,144 @@ def compute_eef_pose_sequence(joint_sequence, kinematics, fk_dim):
     return poses
 
 
+def compute_stacked_eef_pose_rel(poses):
+    poses = np.asarray(poses, dtype=np.float64)
+    if poses.shape[1] == 0:
+        return np.zeros((poses.shape[0], 0), dtype=np.float64)
+    if poses.shape[1] % 7 != 0:
+        raise ValueError(f"EEF pose array must have 7 columns per end effector, got shape {poses.shape}.")
+    rel_parts = [
+        compute_eef_pose_rel(poses[:, start : start + 7])
+        for start in range(0, poses.shape[1], 7)
+    ]
+    return np.concatenate(rel_parts, axis=1)
+
+
+def relative_pose7_to_delta6(relative_poses):
+    relative_poses = np.asarray(relative_poses, dtype=np.float64)
+    if relative_poses.shape[1] == 0:
+        return np.zeros((relative_poses.shape[0], 0), dtype=np.float64)
+    if relative_poses.shape[1] % 7 != 0:
+        raise ValueError(f"Relative EEF pose source must have 7 columns per end effector, got shape {relative_poses.shape}.")
+
+    rel_parts = []
+    for start in range(0, relative_poses.shape[1], 7):
+        block = relative_poses[:, start : start + 7]
+        delta = np.zeros((relative_poses.shape[0], 6), dtype=np.float64)
+        delta[:, :3] = block[:, :3]
+        for index, quat in enumerate(block[:, 3:]):
+            delta[index, 3:] = rotation_vector_from_matrix(quaternion_to_rotation_matrix(quat))
+        rel_parts.append(delta)
+    return np.concatenate(rel_parts, axis=1)
+
+
+def axis_transform_matrix(transform):
+    matrix = np.zeros((3, 3), dtype=np.float64)
+    for output_axis, (source_axis, sign) in enumerate(zip(transform.perm, transform.signs)):
+        matrix[output_axis, source_axis] = sign
+    return matrix
+
+
+def apply_axis_transform_vectors(values, transform):
+    if transform is None or values.shape[1] == 0:
+        return values
+    return values[:, list(transform.perm)] * np.asarray(transform.signs, dtype=np.float64)
+
+
+def apply_axis_transform_pose7(poses, transform):
+    poses = np.asarray(poses, dtype=np.float64)
+    if transform is None or poses.shape[1] == 0:
+        return poses
+    if poses.shape[1] % 7 != 0:
+        raise ValueError(f"Expected 7D pose blocks for axis transform, got shape {poses.shape}.")
+
+    matrix = axis_transform_matrix(transform)
+    transformed = np.zeros_like(poses)
+    for start in range(0, poses.shape[1], 7):
+        block = poses[:, start : start + 7]
+        transformed[:, start : start + 3] = apply_axis_transform_vectors(block[:, :3], transform)
+        for index, quat in enumerate(block[:, 3:]):
+            rotation = quaternion_to_rotation_matrix(quat)
+            transformed[index, start + 3 : start + 7] = quaternion_xyzw_from_rotation(matrix @ rotation @ matrix.T)
+    return transformed
+
+
+def apply_axis_transform_delta6(deltas, transform):
+    deltas = np.asarray(deltas, dtype=np.float64)
+    if transform is None or deltas.shape[1] == 0:
+        return deltas
+    if deltas.shape[1] % 6 != 0:
+        raise ValueError(f"Expected 6D delta blocks for axis transform, got shape {deltas.shape}.")
+
+    transformed = np.zeros_like(deltas)
+    for start in range(0, deltas.shape[1], 6):
+        transformed[:, start : start + 3] = apply_axis_transform_vectors(deltas[:, start : start + 3], transform)
+        transformed[:, start + 3 : start + 6] = apply_axis_transform_vectors(deltas[:, start + 3 : start + 6], transform)
+    return transformed
+
+
+def rotation_matrix_from_rotation_vector(rotvec):
+    rotvec = np.asarray(rotvec, dtype=np.float64)
+    theta = np.linalg.norm(rotvec)
+    if np.isclose(theta, 0.0):
+        return np.eye(3, dtype=np.float64)
+
+    axis = rotvec / theta
+    x, y, z = axis
+    skew = np.array(
+        [
+            [0.0, -z, y],
+            [z, 0.0, -x],
+            [-y, x, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    return np.eye(3, dtype=np.float64) + np.sin(theta) * skew + (1.0 - np.cos(theta)) * (skew @ skew)
+
+
+def compose_pose_delta(pose, delta):
+    pose = np.asarray(pose, dtype=np.float64)
+    delta = np.asarray(delta, dtype=np.float64)
+    base_rot = quaternion_to_rotation_matrix(pose[3:])
+    delta_rot = rotation_matrix_from_rotation_vector(delta[3:])
+    out = np.zeros(7, dtype=np.float64)
+    out[:3] = pose[:3] + delta[:3]
+    out[3:] = quaternion_xyzw_from_rotation(base_rot @ delta_rot)
+    if np.dot(out[3:], pose[3:]) < 0.0:
+        out[3:] *= -1.0
+    return out
+
+
+def integrate_stacked_eef_pose_rel(initial_poses, rel):
+    initial_poses = np.asarray(initial_poses, dtype=np.float64)
+    rel = np.asarray(rel, dtype=np.float64)
+    if rel.shape[1] == 0:
+        return np.zeros((rel.shape[0], 0), dtype=np.float64)
+    if initial_poses.shape[1] % 7 != 0 or rel.shape[1] % 6 != 0:
+        raise ValueError(
+            f"Expected 7D initial poses and 6D relative deltas, got initial={initial_poses.shape}, rel={rel.shape}."
+        )
+    if initial_poses.shape[1] // 7 != rel.shape[1] // 6:
+        raise ValueError(
+            f"Initial pose EEF count and relative EEF count differ: {initial_poses.shape[1] // 7} vs {rel.shape[1] // 6}."
+        )
+
+    integrated = np.zeros((rel.shape[0], initial_poses.shape[1]), dtype=np.float64)
+    if len(rel) == 0:
+        return integrated
+
+    integrated[0] = initial_poses[0]
+    for row in range(len(rel)):
+        if row > 0:
+            integrated[row] = integrated[row - 1]
+        for pose_start, rel_start in zip(range(0, initial_poses.shape[1], 7), range(0, rel.shape[1], 6)):
+            integrated[row, pose_start : pose_start + 7] = compose_pose_delta(
+                integrated[row, pose_start : pose_start + 7],
+                rel[row, rel_start : rel_start + 6],
+            )
+    return integrated
+
+
 def build_multiarm_eef_data(joint_sequence, kinematics_per_arm, layout):
     poses_per_arm = []
     rel_per_arm = []
@@ -1075,6 +2269,157 @@ def build_multiarm_eef_wrench_data(effort_sequence, layout):
     return np.concatenate(wrench_per_arm, axis=1)
 
 
+def extract_index_columns(values, indices, label):
+    values = np.asarray(values, dtype=np.float64)
+    if values.ndim != 2:
+        raise ValueError(f"{label} must be a 2D array, got shape {values.shape}.")
+    if not indices:
+        return np.zeros((values.shape[0], 0), dtype=np.float64)
+    max_index = max(indices)
+    if max_index >= values.shape[1]:
+        raise ValueError(
+            f"{label} refers to index {max_index}, but the source only has {values.shape[1]} columns."
+        )
+    return values[:, indices]
+
+
+def extract_target_mapping_array(mapping, source_arrays):
+    missing_sources = sorted({group.source for group in mapping.groups if group.source not in source_arrays})
+    if missing_sources:
+        return None
+
+    chunks = []
+    num_steps = None
+    for group in mapping.groups:
+        source_array = np.asarray(source_arrays[group.source], dtype=np.float64)
+        if source_array.ndim != 2:
+            raise ValueError(f"Mapping source {group.source!r} must be 2D, got shape {source_array.shape}.")
+        if num_steps is None:
+            num_steps = source_array.shape[0]
+        elif source_array.shape[0] != num_steps:
+            raise ValueError(f"All mapping sources for {mapping.target} must have the same step count.")
+        chunks.append(extract_index_columns(source_array, group.indices, f"{mapping.target}:{group.source}"))
+
+    if num_steps is None:
+        return np.zeros((0, 0), dtype=np.float64)
+
+    if mapping.target in {"measured_eef_pose", "command_eef_pose"}:
+        transformed_chunks = []
+        for chunk, group in zip(chunks, mapping.groups):
+            if chunk.shape[1] != 7:
+                raise ValueError(f"{mapping.target} requires 7 dims per group, got {chunk.shape[1]}.")
+            transformed_chunks.append(apply_axis_transform_pose7(chunk, group.transform))
+        chunks = transformed_chunks
+    elif mapping.target in {"measured_eef_pose_rel", "command_eef_pose_rel"}:
+        normalized = []
+        for chunk, group in zip(chunks, mapping.groups):
+            if chunk.shape[1] == 6:
+                normalized.append(apply_axis_transform_delta6(chunk, group.transform))
+            elif chunk.shape[1] == 7:
+                normalized.append(apply_axis_transform_delta6(relative_pose7_to_delta6(chunk), group.transform))
+            else:
+                raise ValueError(f"{mapping.target} requires 6D deltas or 7D relative poses per group, got {chunk.shape[1]}.")
+        chunks = normalized
+    elif mapping.target == "measured_eef_wrench":
+        padded = []
+        for chunk in chunks:
+            if chunk.shape[1] > 6:
+                raise ValueError(f"{mapping.target} allows at most 6 dims per group, got {chunk.shape[1]}.")
+            if chunk.shape[1] < 6:
+                pad = np.zeros((num_steps, 6 - chunk.shape[1]), dtype=np.float64)
+                chunk = np.concatenate([chunk, pad], axis=1)
+            padded.append(chunk)
+        chunks = padded
+
+    if mapping.operation == "xyz_pair_distance":
+        chunks = [
+            np.linalg.norm(chunks[index] - chunks[index + 1], axis=1, keepdims=True)
+            for index in range(0, len(chunks), 2)
+        ]
+
+    return np.concatenate(chunks, axis=1) if chunks else np.zeros((num_steps, 0), dtype=np.float64)
+
+
+def build_default_target_override(mapping_config, target, source_arrays, source_name, target_prefix):
+    policy = get_target_policy(mapping_config, target)
+    if policy == "auto":
+        return None
+
+    source_array = np.asarray(source_arrays[source_name], dtype=np.float64)
+    num_steps = source_array.shape[0]
+    if policy == "empty":
+        return np.zeros((num_steps, 0), dtype=np.float64)
+    if policy == "remaining":
+        used = mapped_indices_for_source(mapping_config, source_name, target_prefix)
+        remaining = [index for index in range(source_array.shape[1]) if index not in used]
+        return source_array[:, remaining]
+    raise ValueError(f"Unsupported default target policy for {target}: {policy}")
+
+
+def resolve_target_overrides(mapping_config, source_arrays):
+    overrides = {}
+    if mapping_config is None:
+        return overrides
+
+    for target, mapping in mapping_config.target_mappings.items():
+        value = extract_target_mapping_array(mapping, source_arrays)
+        if value is not None:
+            overrides[target] = value
+
+    default_specs = (
+        ("measured_joint_pos", "observation.state", "measured_"),
+        ("command_joint_pos", "action", "command_"),
+    )
+    for target, source_name, target_prefix in default_specs:
+        if target in overrides:
+            continue
+        default_value = build_default_target_override(mapping_config, target, source_arrays, source_name, target_prefix)
+        if default_value is not None:
+            overrides[target] = default_value
+
+    return overrides
+
+
+def is_effectively_zero(values, atol=1e-12):
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return True
+    return not np.count_nonzero(np.abs(values) > atol)
+
+
+def static_mapped_eef_reasons(target_overrides):
+    reasons = []
+
+    measured_eef_pose = target_overrides.get("measured_eef_pose")
+    if measured_eef_pose is not None:
+        measured_eef_pose_rel = compute_stacked_eef_pose_rel(measured_eef_pose)
+        if is_effectively_zero(measured_eef_pose_rel):
+            reasons.append("configured measured_eef_pose is static; measured_eef_pose_rel would be all zeros")
+
+    measured_eef_pose_rel = target_overrides.get("measured_eef_pose_rel")
+    if measured_eef_pose_rel is not None and is_effectively_zero(measured_eef_pose_rel):
+        reasons.append("configured measured_eef_pose_rel is all zeros")
+
+    command_eef_pose = target_overrides.get("command_eef_pose")
+    if command_eef_pose is not None:
+        command_eef_pose_rel = compute_stacked_eef_pose_rel(command_eef_pose)
+        if is_effectively_zero(command_eef_pose_rel):
+            reasons.append("configured command_eef_pose is static; command_eef_pose_rel would be all zeros")
+
+    command_eef_pose_rel = target_overrides.get("command_eef_pose_rel")
+    if command_eef_pose_rel is not None and is_effectively_zero(command_eef_pose_rel):
+        reasons.append("configured command_eef_pose_rel is all zeros")
+
+    return reasons
+
+
+def warn_if_static_mapped_eef(parquet_path, target_overrides):
+    for reason in static_mapped_eef_reasons(target_overrides):
+        print(
+            f"⚠️  Static EEF input in {parquet_path.name}: {reason}."
+        )
+
+
 def save_episode_hdf5_compatible(
     out_path,
     task_desc,
@@ -1086,36 +2431,98 @@ def save_episode_hdf5_compatible(
     kinematics_per_arm,
     layout,
     effort=None,
+    target_overrides=None,
 ):
     dtype_f8 = np.float64
     num_steps = len(time_values)
-    num_grippers = len(layout.gripper_indices)
-    num_eef = len(layout.arm_slices)
+    target_overrides = target_overrides or {}
 
-    if qpos.shape[1] < layout.total_arm_joint_dim or action.shape[1] < layout.total_arm_joint_dim:
-        raise ValueError(
-            f"Expected at least {layout.total_arm_joint_dim} joint dimensions for configured robot layout, "
-            f"got qpos={qpos.shape[1]}, action={action.shape[1]}"
+    measured_joint_pos = np.asarray(target_overrides.get("measured_joint_pos", qpos), dtype=dtype_f8)
+    measured_joint_vel = np.asarray(target_overrides.get("measured_joint_vel", qvel), dtype=dtype_f8)
+    command_joint_pos = np.asarray(target_overrides.get("command_joint_pos", action), dtype=dtype_f8)
+
+    if measured_joint_vel.shape[1] != measured_joint_pos.shape[1]:
+        if "measured_joint_vel" in target_overrides:
+            raise ValueError(
+                "Configured measured_joint_vel dims do not match measured_joint_pos: "
+                f"{measured_joint_vel.shape[1]} vs {measured_joint_pos.shape[1]}"
+            )
+        measured_joint_vel = np.zeros_like(measured_joint_pos)
+
+    if "measured_gripper_joint_pos" in target_overrides:
+        measured_gripper_joint_pos = np.asarray(target_overrides["measured_gripper_joint_pos"], dtype=dtype_f8)
+    elif layout.gripper_indices:
+        measured_gripper_joint_pos = extract_index_columns(
+            measured_joint_pos,
+            layout.gripper_indices,
+            "measured_gripper_joint_pos",
         )
-
-    measured_joint_pos = qpos.astype(dtype_f8)
-    measured_joint_vel = qvel.astype(dtype_f8)
-    command_joint_pos = action.astype(dtype_f8)
-
-    if num_grippers > 0:
-        measured_gripper_joint_pos = qpos[:, layout.gripper_indices].astype(dtype_f8)
-        command_gripper_joint_pos = action[:, layout.gripper_indices].astype(dtype_f8)
     else:
         measured_gripper_joint_pos = np.zeros((num_steps, 0), dtype=dtype_f8)
+
+    if "command_gripper_joint_pos" in target_overrides:
+        command_gripper_joint_pos = np.asarray(target_overrides["command_gripper_joint_pos"], dtype=dtype_f8)
+    elif layout.gripper_indices:
+        command_gripper_joint_pos = extract_index_columns(
+            command_joint_pos,
+            layout.gripper_indices,
+            "command_gripper_joint_pos",
+        )
+    else:
         command_gripper_joint_pos = np.zeros((num_steps, 0), dtype=dtype_f8)
 
-    measured_joint_pos_rel = previous_step_delta(measured_joint_pos)
-    command_joint_pos_rel = previous_step_delta(command_joint_pos)
-    measured_gripper_joint_pos_rel = previous_step_delta(measured_gripper_joint_pos)
-    command_gripper_joint_pos_rel = previous_step_delta(command_gripper_joint_pos)
-    measured_eef_pose, measured_eef_pose_rel = build_multiarm_eef_data(measured_joint_pos, kinematics_per_arm, layout)
-    command_eef_pose, command_eef_pose_rel = build_multiarm_eef_data(command_joint_pos, kinematics_per_arm, layout)
-    if effort is not None:
+    if "measured_eef_pose" in target_overrides:
+        measured_eef_pose = np.asarray(target_overrides["measured_eef_pose"], dtype=dtype_f8)
+    else:
+        if measured_joint_pos.shape[1] < layout.total_arm_joint_dim:
+            raise ValueError(
+                f"Expected at least {layout.total_arm_joint_dim} measured joint dims for FK, got {measured_joint_pos.shape[1]}. "
+                "Provide rmb_mappings.measured_eef_pose to bypass FK."
+            )
+        measured_eef_pose, _ = build_multiarm_eef_data(measured_joint_pos, kinematics_per_arm, layout)
+
+    if "command_eef_pose" in target_overrides:
+        command_eef_pose = np.asarray(target_overrides["command_eef_pose"], dtype=dtype_f8)
+    elif "command_eef_pose_rel" in target_overrides and "measured_eef_pose" in target_overrides:
+        command_eef_pose = integrate_stacked_eef_pose_rel(
+            measured_eef_pose,
+            np.asarray(target_overrides["command_eef_pose_rel"], dtype=dtype_f8),
+        )
+    elif "measured_eef_pose" in target_overrides:
+        command_eef_pose = measured_eef_pose.copy()
+    else:
+        if command_joint_pos.shape[1] < layout.total_arm_joint_dim:
+            raise ValueError(
+                f"Expected at least {layout.total_arm_joint_dim} command joint dims for FK, got {command_joint_pos.shape[1]}. "
+                "Provide rmb_mappings.command_eef_pose or rmb_mappings.command_eef_pose_rel to bypass FK."
+            )
+        command_eef_pose, _ = build_multiarm_eef_data(command_joint_pos, kinematics_per_arm, layout)
+
+    measured_eef_pose_rel = compute_stacked_eef_pose_rel(measured_eef_pose)
+    if "measured_eef_pose_rel" in target_overrides:
+        measured_eef_pose_rel = np.asarray(target_overrides["measured_eef_pose_rel"], dtype=dtype_f8)
+    if "command_eef_pose_rel" in target_overrides:
+        command_eef_pose_rel = np.asarray(target_overrides["command_eef_pose_rel"], dtype=dtype_f8)
+    else:
+        command_eef_pose_rel = compute_stacked_eef_pose_rel(command_eef_pose)
+    num_eef = measured_eef_pose.shape[1] // 7 if measured_eef_pose.shape[1] else (command_eef_pose.shape[1] // 7)
+    if measured_eef_pose.shape[1] % 7 != 0 or command_eef_pose.shape[1] % 7 != 0:
+        raise ValueError(
+            f"EEF pose dims must be divisible by 7, got measured={measured_eef_pose.shape[1]}, command={command_eef_pose.shape[1]}"
+        )
+    if measured_eef_pose.shape[1] != command_eef_pose.shape[1]:
+        raise ValueError(
+            f"Measured and command EEF pose dims must match, got {measured_eef_pose.shape[1]} and {command_eef_pose.shape[1]}"
+        )
+    if measured_eef_pose_rel.shape[1] != 6 * num_eef or command_eef_pose_rel.shape[1] != 6 * num_eef:
+        raise ValueError(
+            f"EEF pose rel datasets must have 6 dims per end effector ({6 * num_eef} total), "
+            f"got measured={measured_eef_pose_rel.shape[1]}, command={command_eef_pose_rel.shape[1]}"
+        )
+
+    if "measured_eef_wrench" in target_overrides:
+        measured_eef_wrench = np.asarray(target_overrides["measured_eef_wrench"], dtype=dtype_f8)
+    elif effort is not None:
         effort = np.asarray(effort, dtype=dtype_f8)
         if effort.shape[1] < layout.total_arm_joint_dim:
             raise ValueError(
@@ -1124,6 +2531,40 @@ def save_episode_hdf5_compatible(
         measured_eef_wrench = build_multiarm_eef_wrench_data(effort, layout)
     else:
         measured_eef_wrench = np.zeros((num_steps, 6 * num_eef), dtype=dtype_f8)
+
+    if measured_eef_wrench.shape[1] != 6 * num_eef:
+        raise ValueError(
+            f"measured_eef_wrench must have 6 dims per end effector ({6 * num_eef} total), got {measured_eef_wrench.shape[1]}"
+        )
+
+    def resolve_rel_dataset(target, default, reference):
+        rel = np.asarray(target_overrides.get(target, default), dtype=dtype_f8)
+        if rel.shape != reference.shape:
+            raise ValueError(
+                f"{target} must have shape {reference.shape}, got {rel.shape}."
+            )
+        return rel
+
+    measured_joint_pos_rel = resolve_rel_dataset(
+        "measured_joint_pos_rel",
+        previous_step_delta(measured_joint_pos),
+        measured_joint_pos,
+    )
+    command_joint_pos_rel = resolve_rel_dataset(
+        "command_joint_pos_rel",
+        previous_step_delta(command_joint_pos),
+        command_joint_pos,
+    )
+    measured_gripper_joint_pos_rel = resolve_rel_dataset(
+        "measured_gripper_joint_pos_rel",
+        previous_step_delta(measured_gripper_joint_pos),
+        measured_gripper_joint_pos,
+    )
+    command_gripper_joint_pos_rel = resolve_rel_dataset(
+        "command_gripper_joint_pos_rel",
+        previous_step_delta(command_gripper_joint_pos),
+        command_gripper_joint_pos,
+    )
     zeros_reward = np.zeros((num_steps,), dtype=dtype_f8)
 
     with h5py.File(out_path, "w") as f:
@@ -1155,16 +2596,32 @@ def save_episode_hdf5_compatible(
         f.create_dataset("time", data=time_values.astype(dtype_f8))
 
 
-def load_episode_from_parquet(parquet_path):
+def load_episode_from_parquet(parquet_path, mapping_config=None):
     schema = pq.ParquetFile(parquet_path).schema_arrow.names
     observation_column = resolve_column_name(schema, exact="observation.state", prefix="observation.state.")
-    action_column = resolve_column_name(schema, exact="action", prefix="action.")
+    action_column = resolve_optional_column_name(schema, exact="action", prefix="action.")
 
     optional_columns = [name for name in ("timestamp", "task_index") if name in schema]
-    table = pq.read_table(parquet_path, columns=[observation_column, action_column] + optional_columns)
+    source_columns = [observation_column] + optional_columns
+    if action_column is not None:
+        source_columns.append(action_column)
+    for source in sorted(mapped_source_names(mapping_config)):
+        if source in schema:
+            source_columns.append(source)
+        else:
+            print(
+                f"⚠️  Missing configured mapping source column '{source}' in {parquet_path.name}; "
+                "dependent RMB targets will use fallback values when available."
+            )
+    source_columns = list(dict.fromkeys(source_columns))
+
+    table = pq.read_table(parquet_path, columns=source_columns)
 
     observation_state = stack_list_column(table[observation_column], dtype=np.float64)
-    action = stack_list_column(table[action_column], dtype=np.float64)
+    if action_column is not None:
+        action = stack_list_column(table[action_column], dtype=np.float64)
+    else:
+        action = np.zeros((observation_state.shape[0], 0), dtype=np.float64)
 
     timestamps = None
     if "timestamp" in table.column_names:
@@ -1174,7 +2631,15 @@ def load_episode_from_parquet(parquet_path):
     if "task_index" in table.column_names:
         task_indices = scalar_column_to_numpy(table["task_index"], dtype=np.int64)
 
-    return observation_state, action, timestamps, task_indices
+    source_arrays = {
+        "observation.state": observation_state,
+        "action": action,
+    }
+    for source in mapped_source_names(mapping_config):
+        if source in table.column_names:
+            source_arrays[source] = stack_list_column(table[source], dtype=np.float64)
+
+    return observation_state, action, timestamps, task_indices, source_arrays
 
 
 def apply_action_slice(action, vector_layout, parquet_path):
@@ -1388,17 +2853,26 @@ def process_single_episode(job):
     episode_index = infer_episode_index(job.parquet_path)
     episode_name = episode_output_name(episode_index)
     rmb_dir = job.out_dir / job.dataset_name / episode_name
-    rmb_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"📄 Reading parquet: {job.parquet_path}")
 
-    observation_state, action, timestamps, task_indices = load_episode_from_parquet(job.parquet_path)
-    action = apply_action_slice(action, job.vector_layout, job.parquet_path)
+    observation_state, raw_action, timestamps, task_indices, source_arrays = load_episode_from_parquet(
+        job.parquet_path,
+        mapping_config=job.mapping_config,
+    )
+    action = apply_action_slice(raw_action, job.vector_layout, job.parquet_path)
     if action.shape[1] != job.robot_layout.total_arm_joint_dim:
-        print(
-            f"⚠️  action dim for {job.parquet_path.name} is {action.shape[1]}. "
-            f"This converter uses the first {job.robot_layout.total_arm_joint_dim} dims based on the configured robot layout."
-        )
+        if "command_eef_pose" in job.mapping_config.target_mappings:
+            print(
+                f"ℹ️  action dim for {job.parquet_path.name} is {action.shape[1]}, "
+                f"while the inferred robot layout uses {job.robot_layout.total_arm_joint_dim} dims for FK. "
+                "Configured command_eef_pose mapping will bypass FK for the command pose."
+            )
+        else:
+            print(
+                f"⚠️  action dim for {job.parquet_path.name} is {action.shape[1]}. "
+                f"This converter uses the first {job.robot_layout.total_arm_joint_dim} dims based on the configured robot layout."
+            )
     qpos, qvel, effort = split_state_components(observation_state, action.shape[1], job.parquet_path, job.vector_layout)
 
     source_fps = resolve_source_fps(job.info, timestamps)
@@ -1409,6 +2883,21 @@ def process_single_episode(job):
     qvel_rs = qvel[sample_indices]
     effort_rs = effort[sample_indices] if effort is not None else None
     action_rs = action[sample_indices]
+    source_arrays_rs = {
+        source: values[sample_indices]
+        for source, values in source_arrays.items()
+    }
+    target_overrides = resolve_target_overrides(job.mapping_config, source_arrays_rs)
+    static_eef_reasons = static_mapped_eef_reasons(target_overrides)
+    if static_eef_reasons:
+        for reason in static_eef_reasons:
+            prefix = "❌" if job.skip_static_eef else "⚠️"
+            print(f"{prefix} Static EEF input in {job.parquet_path.name}: {reason}.")
+        if job.skip_static_eef:
+            if rmb_dir.exists():
+                shutil.rmtree(rmb_dir)
+            print(f"⏭️  Skipped static EEF episode: {episode_name}")
+            return
 
     if timestamps is not None and len(timestamps) == len(action):
         time_values = timestamps[sample_indices]
@@ -1423,6 +2912,7 @@ def process_single_episode(job):
         task_indices=task_indices,
     )
 
+    rmb_dir.mkdir(parents=True, exist_ok=True)
     camera_names = export_episode_videos(
         dataset_dir=job.dataset_dir,
         info=job.info,
@@ -1453,6 +2943,7 @@ def process_single_episode(job):
             for target_link in job.robot_layout.eef_target_links
         ],
         layout=job.robot_layout,
+        target_overrides=target_overrides,
     )
 
     print(f"✅ Done: {episode_name}")
@@ -1471,11 +2962,19 @@ def process_dataset(
     arm_fk_dims=None,
     eef_target_links=None,
     robot_name=None,
+    mapping_config_path=None,
+    eef_transform_axes=None,
+    skip_static_eef=False,
     assume_yes=False,
 ):
     out_dir = Path(out_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     robot_urdf = resolve_robot_urdf(robot_urdf)
+    raw_mapping_config = read_optional_json(mapping_config_path)
+    eef_transform = parse_eef_transform_axes_arg(eef_transform_axes)
+    if eef_transform is not None:
+        raw_mapping_config = dict(raw_mapping_config)
+        raw_mapping_config["eef_transform"] = eef_transform
 
     dataset_dirs = discover_lerobot_datasets(input_dir)
     if not dataset_dirs:
@@ -1486,6 +2985,8 @@ def process_dataset(
         bundle = load_dataset_bundle(
             dataset_dir=dataset_dir,
             robot_urdf=robot_urdf,
+            raw_mapping_config=raw_mapping_config,
+            mapping_config_path=mapping_config_path,
             arm_joint_dims=arm_joint_dims,
             gripper_indices=gripper_indices,
             arm_fk_dims=arm_fk_dims,
@@ -1501,7 +3002,15 @@ def process_dataset(
         if not confirm_dataset_conversion(bundle.dataset_name, assume_yes=assume_yes):
             print(f"⏭️  Skipped dataset: {bundle.dataset_name}")
             continue
-        jobs = build_episode_jobs(bundle, out_dir, fps, camera_workers, video_preset, robot_urdf)
+        jobs = build_episode_jobs(
+            bundle,
+            out_dir,
+            fps,
+            camera_workers,
+            video_preset,
+            robot_urdf,
+            skip_static_eef=skip_static_eef,
+        )
 
         if nproc > 1:
             with Pool(nproc) as pool:
@@ -1576,12 +3085,34 @@ def main():
         help="Robot name used for RMB metadata attrs such as demo_name/env. Defaults to LeRobot meta.robot_type or Aloha.",
     )
     parser.add_argument(
+        "--mapping_config",
+        type=str,
+        default=None,
+        help="JSON file that explicitly maps LeRobot vectors into RMB datasets. Fields are resolved against raw LeRobot vectors before modality slicing.",
+    )
+    parser.add_argument(
+        "--eef_transform_axes",
+        type=str,
+        default=None,
+        help=(
+            "Optional global signed axis transform for all EEF pose/relative mappings, "
+            "for example 'x,-z,y' or '--eef_transform_axes=-x,y,z'. "
+            "Overrides top-level eef_transform in --mapping_config. "
+            "Group-level transform entries still take precedence."
+        ),
+    )
+    parser.add_argument(
+        "--skip_static_eef",
+        action="store_true",
+        help="Skip episodes whose configured EEF pose/relative sources are static, and remove any existing output for those episodes.",
+    )
+    parser.add_argument(
         "-y",
         "--yes",
         action="store_true",
         help="Skip the y/n confirmation prompt after showing the LeRobot keys and RMB mapping.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(normalize_cli_args(sys.argv[1:]))
 
     process_dataset(
         input_dir=args.input_dir,
@@ -1596,6 +3127,9 @@ def main():
         arm_fk_dims=args.arm_fk_dims,
         eef_target_links=args.eef_target_links,
         robot_name=args.robot_name,
+        mapping_config_path=args.mapping_config,
+        eef_transform_axes=args.eef_transform_axes,
+        skip_static_eef=args.skip_static_eef,
         assume_yes=args.yes,
     )
 

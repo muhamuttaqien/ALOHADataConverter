@@ -1,0 +1,98 @@
+{
+  "vector_layout": {
+    "qpos": [0, 0],
+    "qvel": [0, 0],
+    "effort": null,
+    "action": [0, 0]
+  },
+  "robot_layout": {
+    "arm_joint_dims": [0, 0],
+    "gripper_indices": "none",
+    "arm_fk_dims": [0, 0],
+    "robot_name": "genoma"
+  },
+  "default_targets": {
+    "measured_joint_pos": "empty",
+    "command_joint_pos": "empty"
+  },
+  "rmb_mappings": {
+    "measured_eef_pose": {
+      "groups": [
+        {
+          "name": "left_hand_root",
+          "source": "observation.pose.left_hand_root.absolute",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        },
+        {
+          "name": "right_hand_root",
+          "source": "observation.pose.right_hand_root.absolute",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        }
+      ]
+    },
+    "command_eef_pose": {
+      "groups": [
+        {
+          "name": "left_controller_relative",
+          "source": "action.left_controller.relative",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        },
+        {
+          "name": "right_controller_relative",
+          "source": "action.right_controller.relative",
+          "fields": ["x", "y", "z", "qx", "qy", "qz", "qw"]
+        }
+      ]
+    },
+    "measured_gripper_joint_pos": {
+      "operation": "xyz_pair_distance",
+      "groups": [
+        {
+          "name": "left_left_finger_tip",
+          "source": "observation.pose.left_left_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "left_right_finger_tip",
+          "source": "observation.pose.left_right_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "right_left_finger_tip",
+          "source": "observation.pose.right_left_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "right_right_finger_tip",
+          "source": "observation.pose.right_right_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        }
+      ]
+    },
+    "command_gripper_joint_pos": {
+      "operation": "xyz_pair_distance",
+      "groups": [
+        {
+          "name": "left_left_finger_tip",
+          "source": "observation.pose.left_left_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "left_right_finger_tip",
+          "source": "observation.pose.left_right_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "right_left_finger_tip",
+          "source": "observation.pose.right_left_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        },
+        {
+          "name": "right_right_finger_tip",
+          "source": "observation.pose.right_right_finger_tip.absolute",
+          "fields": ["x", "y", "z"]
+        }
+      ]
+    }
+  }
+}
